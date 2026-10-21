@@ -84,6 +84,6 @@ struct ProjectBrowser: View {
         ("← →", "Move a bar"), ("⌥← ⌥→", "Previous / next section"), ("1–9", "Jump to section"),
         ("L / ⇧L", "Loop on/off / loop selection"), ("J", "Jam over the loop"), ("P / ⇧P", "Punch on/off / punch selection"),
         ("C", "Click on/off"), ("⇧M", "Add section marker"), ("A M S", "Arm / mute / solo track"),
-        ("T / ⇧T", "New audio / MIDI track"), ("X", "Mixer"), ("⌘E", "Export mixdown"),
+        ("T / ⇧T", "New audio / MIDI track"), ("Z", "Zoom to fit"), ("⌘K", "Computer keyboard as MIDI"), ("X", "Mixer"), ("⌘E", "Export mixdown"),
     ]
 }

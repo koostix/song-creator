@@ -318,6 +318,28 @@ enum SelfTest {
         session.undo()
         try check(session.song.tracks[0].strip.volumeDB == 0, "a fader move undoes in one step")
 
+        print("Musical typing and zoom")
+        session.musicalTyping = true
+        try check(session.typingKeyDown("a", keyCode: 0, isRepeat: false) && session.typingKeyDown("k", keyCode: 40, isRepeat: false),
+                  "A and K are note keys")
+        try check(!session.typingKeyDown("r", keyCode: 15, isRepeat: false), "R stays free for record")
+        _ = session.typingKeyDown("x", keyCode: 7, isRepeat: false)
+        try check(session.typingOctave == 5 && Session.noteName(12 * (session.typingOctave + 1)) == "C5", "X moves up an octave")
+        try check(session.typingKeyUp(keyCode: 0) && session.typingKeyUp(keyCode: 40) && !session.typingKeyUp(keyCode: 0),
+                  "notes release by key, even after an octave change")
+        _ = session.typingKeyDown("s", keyCode: 1, isRepeat: false)
+        session.musicalTyping = false
+        try check(!session.typingKeyUp(keyCode: 1), "turning typing off releases held notes")
+        session.timelineWidth = 1000
+        session.edit { s in
+            s.tempo = 120
+            s.tracks[0].takes = [Take(name: "T", fileName: "t1.caf", start: 0, duration: 60)]
+            s.tracks[0].assign(takeID: s.tracks[0].takes[0].id, over: TimeRange(start: 0, end: 60))
+        }
+        session.scrollX = 30
+        session.zoomToFit()
+        try check(session.scrollX == 0 && abs(session.pixelsPerSecond * 60 * 1.04 - 1000) < 0.01, "zoom to fit shows the whole song")
+
         print("Auto-arm monitoring")
         for mode in [AutoArmMode.newTrack, .nextTrack] {
             var s = Song.newIdea()

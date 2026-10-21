@@ -57,7 +57,7 @@ final class Session {
 
     // Editing / view state
     var selection: TimeRange?
-    var selectedTrackID: UUID?
+    var selectedTrackID: UUID? { didSet { updateSelectedMIDI() } }
     var selectedRegions: Set<UUID> = []
     @ObservationIgnored var clipboard: RegionClipboard?
     @ObservationIgnored private var gestureBase: Song?
@@ -106,6 +106,13 @@ final class Session {
     @ObservationIgnored private var midiEvents: [(UInt8, UInt8, UInt8, UInt64)] = []
     @ObservationIgnored private var midiRecording = false
     @ObservationIgnored private var armedMIDI: [UUID] = []
+    /// The selected track if it's a MIDI track (read from the MIDI thread under midiLock).
+    @ObservationIgnored private var selectedMIDI: UUID?
+
+    private func updateSelectedMIDI() {
+        let id = song.tracks.first { $0.id == selectedTrackID && $0.kind == .midi }?.id
+        midiLock.lock(); selectedMIDI = id; midiLock.unlock()
+    }
 
     /// JAM: recording over a loop plays it out straight (one long take) and pastes the loop out on stop.
     var jamMode = Prefs.jamMode { didSet { Prefs.jamMode = jamMode } }
@@ -209,16 +216,78 @@ final class Session {
             DispatchQueue.main.async { self?.midiSources = self?.midi.sourceNames ?? [] }
         }
         midi.onEvent = { [weak self] status, d1, d2, ts in
-            guard let self else { return }
-            let kind = status & 0xF0
-            guard kind == 0x80 || kind == 0x90 || kind == 0xB0 || kind == 0xE0 else { return }
-            self.midiLock.lock()
-            let targets = self.armedMIDI
-            if self.midiRecording { self.midiEvents.append((status, d1, d2, ts)) }
-            self.midiLock.unlock()
-            for t in targets { self.audio.sendMIDI(track: t, status: status, data1: d1, data2: d2) }
+            self?.handleMIDI(status, d1, d2, ts)
         }
         midi.start()
+    }
+
+    /// Incoming notes from hardware or the computer keyboard: play armed MIDI tracks (or, if none are
+    /// armed, the selected MIDI track) and capture them while recording. Safe from any thread.
+    func handleMIDI(_ status: UInt8, _ d1: UInt8, _ d2: UInt8, _ ts: UInt64) {
+        let kind = status & 0xF0
+        guard kind == 0x80 || kind == 0x90 || kind == 0xB0 || kind == 0xE0 else { return }
+        midiLock.lock()
+        let targets = armedMIDI.isEmpty ? (selectedMIDI.map { [$0] } ?? []) : armedMIDI
+        if midiRecording { midiEvents.append((status, d1, d2, ts)) }
+        midiLock.unlock()
+        for t in targets { audio.sendMIDI(track: t, status: status, data1: d1, data2: d2) }
+    }
+
+    // MARK: - Musical typing (computer keyboard as MIDI)
+
+    /// The Logic/GarageBand layout: A row = white keys, W row = black keys, starting at C.
+    static let typingKeys: [Character: UInt8] = [
+        "a": 0, "w": 1, "s": 2, "e": 3, "d": 4, "f": 5, "t": 6, "g": 7, "y": 8, "h": 9,
+        "u": 10, "j": 11, "k": 12, "o": 13, "l": 14, "p": 15, ";": 16, "'": 17,
+    ]
+
+    var musicalTyping = false { didSet { if !musicalTyping { releaseTypingNotes() } } }
+    /// Octave of the A key; 4 means A plays middle C (MIDI 60).
+    var typingOctave = 4
+    var typingVelocity = 100
+    @ObservationIgnored private var typingHeld: [UInt16: UInt8] = [:]
+
+    /// Handle a key press while musical typing is on. Returns true if the key was used.
+    func typingKeyDown(_ ch: Character, keyCode: UInt16, isRepeat: Bool) -> Bool {
+        switch ch {
+        case "z": if !isRepeat { typingOctave = max(0, typingOctave - 1) }; return true
+        case "x": if !isRepeat { typingOctave = min(8, typingOctave + 1) }; return true
+        case "c": typingVelocity = max(1, typingVelocity - 10); return true
+        case "v": typingVelocity = min(127, typingVelocity + 10); return true
+        default: break
+        }
+        guard let offset = Session.typingKeys[ch] else { return false }
+        if isRepeat || typingHeld[keyCode] != nil { return true }
+        let note = Int(offset) + 12 * (typingOctave + 1)
+        guard note <= 127 else { return true }
+        typingHeld[keyCode] = UInt8(note)
+        handleMIDI(0x90, UInt8(note), UInt8(typingVelocity), HostTime.now)
+        return true
+    }
+
+    func typingKeyUp(keyCode: UInt16) -> Bool {
+        guard let note = typingHeld.removeValue(forKey: keyCode) else { return false }
+        handleMIDI(0x80, note, 0, HostTime.now)
+        return true
+    }
+
+    func releaseTypingNotes() {
+        for note in typingHeld.values { handleMIDI(0x80, note, 0, HostTime.now) }
+        typingHeld = [:]
+    }
+
+    static func noteName(_ midi: Int) -> String {
+        TunerView.names[((midi % 12) + 12) % 12] + "\(midi / 12 - 1)"
+    }
+
+    // MARK: - Zoom
+
+    /// Fit the whole song (at least 8 bars, and the loop if it's on) in the window.
+    func zoomToFit() {
+        var end = max(song.contentEnd, song.secondsPerBar * 8)
+        if song.loopEnabled { end = max(end, song.loop.end) }
+        pixelsPerSecond = min(800, max(4, timelineWidth / (end * 1.04)))
+        scrollX = 0
     }
 
     private func loadWaveforms() {
@@ -233,6 +302,7 @@ final class Session {
         midiLock.lock()
         armedMIDI = song.tracks.filter { $0.kind == .midi && $0.armed }.map(\.id)
         midiLock.unlock()
+        updateSelectedMIDI()
         scheduleSave()
     }
 

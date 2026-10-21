@@ -25,6 +25,9 @@ struct MainView: View {
         .onAppear { installKeys() }
         .onDisappear { if let keyMonitor { NSEvent.removeMonitor(keyMonitor) } }
         .onReceive(NotificationCenter.default.publisher(for: .showExport)) { _ in showExport = true }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            session.releaseTypingNotes()   // no stuck notes when switching apps mid-chord
+        }
         .onReceive(NotificationCenter.default.publisher(for: .importAudio)) { _ in importPanel() }
         .sheet(isPresented: $showExport) { ExportSheet(session: session) }
     }
@@ -39,12 +42,22 @@ struct MainView: View {
 
     /// Single-key shortcuts, like a hardware recorder. Ignored while typing in a text field.
     private func installKeys() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            // Releases always reach musical typing, even if focus moved while a key was held.
+            if event.type == .keyUp {
+                return session.typingKeyUp(keyCode: event.keyCode) ? nil : event
+            }
             if let responder = NSApp.keyWindow?.firstResponder, responder is NSText { return event }
             if NSApp.keyWindow?.attachedSheet != nil || showExport { return event }
             let flags = event.modifierFlags.intersection([.command, .option, .shift, .control])
+            if session.musicalTyping, flags.isEmpty,
+               let ch = event.charactersIgnoringModifiers?.lowercased().first,
+               session.typingKeyDown(ch, keyCode: event.keyCode, isRepeat: event.isARepeat) {
+                return nil
+            }
             if flags == .command {
                 switch event.charactersIgnoringModifiers?.lowercased() {
+                case "k": session.musicalTyping.toggle(); return nil
                 case "c": session.copyRegions(); return nil
                 case "v": session.pasteRegions(); return nil
                 case "d": session.duplicateRegions(); return nil
@@ -80,6 +93,7 @@ struct MainView: View {
             case "a": if let id = selected { s.toggleArm(id) }
             case "t": s.addTrack(kind: shift ? .midi : .audio)
             case "x": withAnimation(.easeOut(duration: 0.15)) { s.showMixer.toggle() }
+            case "z": s.zoomToFit()
             case "=", "+": s.pixelsPerSecond = min(800, s.pixelsPerSecond * 1.25)
             case "-": s.pixelsPerSecond = max(4, s.pixelsPerSecond / 1.25)
             case "1"..."9": s.jumpToMarker(index: Int(String(ch))! - 1)
@@ -189,8 +203,12 @@ struct TransportBar: View {
             HStack(spacing: 2) {
                 Button { session.pixelsPerSecond = max(4, session.pixelsPerSecond / 1.4) } label: { Image(systemName: "minus.magnifyingglass") }
                 Button { session.pixelsPerSecond = min(800, session.pixelsPerSecond * 1.4) } label: { Image(systemName: "plus.magnifyingglass") }
+                Button { session.zoomToFit() } label: { Image(systemName: "arrow.left.and.right.square") }
+                    .help("Zoom to fit the whole song (Z)")
             }
             .buttonStyle(.plain).foregroundStyle(Theme.dim)
+
+            TypingToggle(session: session)
 
             LitButton(label: "MIX", on: session.showMixer, width: 34, help: "Mixer (X)") {
                 withAnimation(.easeOut(duration: 0.15)) { session.showMixer.toggle() }
@@ -370,5 +388,32 @@ struct TunerButton: View {
         .buttonStyle(.plain)
         .help("Tuner (input of the selected or armed track)")
         .popover(isPresented: $open, arrowEdge: .bottom) { TunerView(session: session) }
+    }
+}
+
+/// Computer keyboard as a MIDI keyboard, with octave and velocity readout while it's on.
+struct TypingToggle: View {
+    @Bindable var session: Session
+
+    var body: some View {
+        HStack(spacing: 4) {
+            LitButton(label: "KEYS", on: session.musicalTyping, color: .purple, width: 40,
+                      help: "Play MIDI from your computer keyboard (⌘K). A–' play notes (W, E, T, Y, U, O, P are black keys), Z/X change octave, C/V change velocity. Notes go to armed MIDI tracks, or the selected MIDI track if none are armed.") {
+                session.musicalTyping.toggle()
+            }
+            if session.musicalTyping {
+                Button { session.typingOctave = max(0, session.typingOctave - 1) } label: { Image(systemName: "chevron.left") }
+                    .help("Octave down (Z)")
+                Text(Session.noteName(12 * (session.typingOctave + 1)))
+                    .font(.system(size: 10, weight: .bold, design: .monospaced)).frame(width: 26)
+                Button { session.typingOctave = min(8, session.typingOctave + 1) } label: { Image(systemName: "chevron.right") }
+                    .help("Octave up (X)")
+                Text("v\(session.typingVelocity)")
+                    .font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.dim)
+                    .help("Velocity (C / V)")
+            }
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 10, weight: .bold))
     }
 }
