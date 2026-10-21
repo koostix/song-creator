@@ -107,8 +107,13 @@ final class AudioEngine {
     /// Plugin state carried across an engine rebuild, applied when each plugin reloads.
     private var carriedStates: [UUID: [String: Any]] = [:]
     private(set) var clickFormat: AVAudioFormat!
-    /// Whether the selected input device has any channels. Touching inputNode without one is unsafe.
+    /// Whether the input is usable. Touching inputNode without one is unsafe (or, for a mismatched
+    /// Bluetooth headset, degrades the output), so everything checks this first.
     private(set) var hasInput = false
+    /// Why audio recording is unavailable, for the UI.
+    private(set) var inputProblem: String?
+    /// The user has denied microphone access (the UI offers to open System Settings).
+    private(set) var micDenied = false
 
     // Live input for per-track monitoring.
     private var inputRing: InputRing?
@@ -157,7 +162,40 @@ final class AudioEngine {
         if let outputDevice { AudioDevices.setDevice(outputDevice, on: engine.outputNode) }
         let inID = inputDevice ?? AudioDevices.defaultDevice(input: true)
         hasInput = inID.map { AudioDevices.inputChannels($0) > 0 } ?? false
+        inputProblem = hasInput ? nil : "No audio input device found. Pick one in Settings."
+        micDenied = false
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .denied, .restricted:
+            hasInput = false
+            micDenied = true
+            inputProblem = "Song Creator isn't allowed to use the microphone, so audio recording is off. "
+                + "Allow it in System Settings → Privacy & Security → Microphone."
+        case .notDetermined:
+            // Don't open the input until the user answers the permission prompt.
+            hasInput = false
+            inputProblem = "Waiting for microphone permission…"
+        default:
+            break
+        }
+        // Recording needs input and output at the same rate. If they differ, leave the input closed:
+        // opening a Bluetooth headset's mic (e.g. 16 kHz) drops its output to 16 kHz call quality too.
+        if hasInput, let inID, let outID = outputDevice ?? AudioDevices.defaultDevice(input: false) {
+            let inRate = AudioDevices.sampleRate(inID), outRate = AudioDevices.sampleRate(outID)
+            if inRate > 0, outRate > 0, inRate != outRate {
+                hasInput = false
+                let name = AudioDevices.name(inID) ?? "The input"
+                inputProblem = "\(name) records at \(Int(inRate)) Hz but plays at \(Int(outRate)) Hz, so audio recording is off. "
+                    + "Playback, KEYS and MIDI still work. To record audio, pick another input in Settings (⌘,)."
+            }
+        }
         if let inputDevice, hasInput { AudioDevices.setDevice(inputDevice, on: engine.inputNode) }
+        if hasInput {
+            let f = engine.inputNode.inputFormat(forBus: 0)
+            if f.channelCount == 0 || f.sampleRate == 0 {
+                hasInput = false
+                inputProblem = "The audio input isn't available right now. Check the device and microphone permission, or pick another input in Settings."
+            }
+        }
 
         sampleRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
         if sampleRate <= 0 { sampleRate = 48000 }
@@ -208,6 +246,25 @@ final class AudioEngine {
         engine.connect(engine.inputNode, to: sink, format: format)
         inputRing = ring
         inputSink = sink
+    }
+
+    /// Switch to faster-than-realtime offline rendering. Live input can't be pulled offline: once the
+    /// engine has opened an input (e.g. a 16 kHz Bluetooth headset mic) an offline render with no input
+    /// data comes out silent, so the input is fed silence and live monitoring is disconnected.
+    func enableOfflineRendering(maxFrames: AVAudioFrameCount = 4096) throws {
+        detachInputSink()
+        engine.stop()
+        try engine.enableManualRenderingMode(.offline, format: stereo, maximumFrameCount: maxFrames)
+        if hasInput {
+            let silence = AVAudioPCMBuffer(pcmFormat: stereo, frameCapacity: maxFrames)!
+            _ = engine.inputNode.setManualRenderingInputPCMFormat(stereo) { frames in
+                silence.frameLength = min(frames, maxFrames)
+                for buf in UnsafeMutableAudioBufferListPointer(silence.mutableAudioBufferList) {
+                    if let d = buf.mData { memset(d, 0, Int(buf.mDataByteSize)) }
+                }
+                return UnsafePointer(silence.audioBufferList)
+            }
+        }
     }
 
     /// Offline rendering can't pull live input; call before entering manual rendering mode.

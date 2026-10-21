@@ -4,7 +4,7 @@ struct MixerView: View {
     @Bindable var session: Session
 
     var body: some View {
-        ScrollView(.horizontal) {
+        ScrollView([.horizontal, .vertical]) {
             HStack(alignment: .top, spacing: 2) {
                 ForEach(session.song.tracks) { track in
                     ChannelStripView(session: session, track: track)
@@ -36,7 +36,7 @@ struct ChannelStripView: View {
     var body: some View {
         let id = track.id
         let s = track.strip
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             Text(track.name).font(.system(size: 10, weight: .bold)).lineLimit(1)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 3)
@@ -84,8 +84,8 @@ struct ChannelStripView: View {
                  format: { $0 == 0 ? "C" : ($0 < 0 ? String(format: "L%.0f", -$0 * 100) : String(format: "R%.0f", $0 * 100)) })
 
             HStack(spacing: 3) {
-                Fader(db: session.stripBinding(id, \.volumeDB), height: 120)
-                MeterBar(level: { [audio = session.audio] in audio.meters.level(id) }).frame(width: 5, height: 112)
+                Fader(db: session.stripBinding(id, \.volumeDB), height: 104)
+                MeterBar(level: { [audio = session.audio] in audio.meters.level(id) }).frame(width: 5, height: 96)
             }
             Text(s.volumeDB.dbString).font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.dim)
             HStack(spacing: 3) {
@@ -148,9 +148,9 @@ struct MasterStrip: View {
                       help: "Peak limiter on the mix bus") { session.song.master.limiterOn.toggle() }
             Spacer()
             HStack(spacing: 3) {
-                Fader(db: $session.song.master.volumeDB, height: 170)
+                Fader(db: $session.song.master.volumeDB, height: 150)
                 MeterBar(level: { [audio = session.audio] in audio.meters.level(MeterStore.masterID) })
-                    .frame(width: 6, height: 162)
+                    .frame(width: 6, height: 142)
             }
             Text(session.song.master.volumeDB.dbString).font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.dim)
         }
@@ -167,9 +167,13 @@ struct InsertSlots: View {
     @Bindable var session: Session
     let track: Track
 
+    static let visible = 2
+    static let height: CGFloat = 2 * 18 + 14
+
     var body: some View {
         VStack(spacing: 2) {
-            ForEach(track.inserts) { slot in
+            // Fixed height in every strip so EQ, knobs and faders line up across the mixer.
+            ForEach(track.inserts.prefix(InsertSlots.visible)) { slot in
                 let status = session.pluginStatus(slot)
                 HStack(spacing: 2) {
                     Circle().fill(slot.bypass ? Theme.dim.opacity(0.4) : (status == nil ? Color.green : Color.orange))
@@ -192,6 +196,11 @@ struct InsertSlots: View {
                     Button("Remove") { session.removeInsert(slot.id, from: track.id) }
                 }
             }
+            if track.inserts.count > InsertSlots.visible {
+                Text("+\(track.inserts.count - InsertSlots.visible) more in FX")
+                    .font(.system(size: 8, weight: .medium)).foregroundStyle(Theme.dim)
+                    .help("Open the track's FX button to see every plugin")
+            }
             Menu {
                 ForEach(PluginCatalog.grouped(PluginCatalog.effects), id: \.0) { group in
                     Menu(group.0) {
@@ -206,5 +215,6 @@ struct InsertSlots: View {
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         }
         .padding(.horizontal, 4)
+        .frame(height: InsertSlots.height, alignment: .top)
     }
 }

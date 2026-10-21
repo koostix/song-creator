@@ -79,6 +79,8 @@ enum PluginWindows {
         }
     }
 
+    static func isOpen(_ slot: UUID) -> Bool { windows[slot]?.isVisible ?? false }
+
     static func closeAll() {
         for w in windows.values { w.close() }
         windows = [:]

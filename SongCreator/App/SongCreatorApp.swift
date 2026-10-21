@@ -50,6 +50,7 @@ struct SongCreatorApp: App {
     init() {
         #if DEBUG
         SelfTest.runIfRequested()
+        SelfTest.snapshotIfRequested()
         #endif
     }
 
@@ -57,7 +58,7 @@ struct SongCreatorApp: App {
         WindowGroup("Song Creator") {
             RootView()
                 .environment(model)
-                .frame(minWidth: 1000, minHeight: 600)
+                .frame(minWidth: 1180, minHeight: 600)
                 .onAppear { delegate.model = model }
         }
         .windowStyle(.hiddenTitleBar)
@@ -98,7 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Ask for the microphone up front so the first take isn't lost to a permission prompt.
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            AVCaptureDevice.requestAccess(for: .audio) { _ in
+                // The engine waited for the answer before opening the input; rebuild with it now.
+                DispatchQueue.main.async { self.model?.session?.rebuildEngine() }
+            }
         }
     }
 

@@ -195,3 +195,45 @@ extension EnvironmentValues {
         set { self[ContinuousEditKey.self] = newValue }
     }
 }
+
+/// A name that only becomes editable on double-click, so it never steals keys meant for
+/// shortcuts or KEYS. Return or clicking away saves, Escape cancels.
+struct RenameField: View {
+    let text: String
+    var font: Font = .system(size: 12, weight: .semibold)
+    let onCommit: (String) -> Void
+
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        if editing {
+            TextField("", text: $draft)
+                .textFieldStyle(.plain)
+                .font(font)
+                .focused($focused)
+                .onSubmit(commit)
+                .onExitCommand { editing = false }
+                .onChange(of: focused) { _, f in if !f && editing { commit() } }
+                .onAppear { focused = true }
+        } else {
+            Text(text)
+                .font(font)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    draft = text
+                    editing = true
+                }
+                .help("\(text) — double-click to rename")
+        }
+    }
+
+    private func commit() {
+        let t = draft.trimmingCharacters(in: .whitespaces)
+        editing = false
+        if !t.isEmpty && t != text { onCommit(t) }
+    }
+}

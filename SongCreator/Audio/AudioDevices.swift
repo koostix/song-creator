@@ -56,6 +56,19 @@ enum AudioDevices {
         AudioObjectSetPropertyData(id, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value)
     }
 
+    /// The device's current sample rate, read without opening any stream (so a Bluetooth
+    /// headset isn't pushed into its low-quality call mode just by asking).
+    static func sampleRate(_ id: AudioDeviceID) -> Double {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var rate = Float64(0)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &rate) == noErr else { return 0 }
+        return rate
+    }
+
+    static func name(_ id: AudioDeviceID) -> String? { all().first { $0.id == id }?.name }
+
     static func inputChannels(_ id: AudioDeviceID) -> Int {
         channels(id, kAudioDevicePropertyScopeInput)
     }

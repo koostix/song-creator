@@ -27,10 +27,10 @@ struct TrackHeader: View {
                 HStack(spacing: 6) {
                     Image(systemName: track.kind == .midi ? "pianokeys" : (track.channels == 2 ? "waveform.path" : "waveform"))
                         .font(.system(size: 10)).foregroundStyle(Theme.color(track.colorIndex))
-                    TextField("Name", text: Binding(get: { track.name },
-                                                    set: { v in session.updateTrack(track.id, undoable: false) { $0.name = v } }))
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold))
+                    RenameField(text: track.name) { name in
+                        session.updateTrack(track.id) { $0.name = name }
+                    }
+                    FXMenu(session: session, track: track)
                     MeterBar(level: { [audio = session.audio, id = track.id, armed = track.armed, kind = track.kind,
                                        ch = track.inputChannel, stereo = track.channels == 2] in
                         // Armed audio tracks show their input; otherwise the track output.
@@ -149,5 +149,61 @@ struct TrackHeader: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help(track.instrument.flatMap { session.pluginStatus($0) } ?? "Instrument for this track")
+    }
+}
+
+/// Every plugin on a track (instrument and effects) in one place: click one to open its window.
+struct FXMenu: View {
+    @Bindable var session: Session
+    let track: Track
+
+    private var slots: [PluginSlot] { (track.instrument.map { [$0] } ?? []) + track.inserts }
+
+    var body: some View {
+        let problem = slots.contains { session.pluginStatus($0) != nil }
+        Menu {
+            if track.kind == .midi {
+                Section("Instrument") {
+                    if let slot = track.instrument {
+                        Button(label(slot)) { session.openEditor(slot, track: track) }
+                    } else {
+                        Text("Built-in: \(GMPrograms.name(track.program))")
+                    }
+                }
+            }
+            Section("Effects") {
+                if track.inserts.isEmpty {
+                    Text("No effects yet")
+                }
+                ForEach(track.inserts) { slot in
+                    Button(label(slot)) { session.openEditor(slot, track: track) }
+                }
+            }
+            Menu("Add Effect") {
+                ForEach(PluginCatalog.grouped(PluginCatalog.effects), id: \.0) { group in
+                    Menu(group.0) {
+                        ForEach(group.1) { info in
+                            Button(info.name) { session.addInsert(info, to: track.id) }
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 2) {
+                Text(slots.isEmpty ? "FX" : "FX \(slots.count)")
+                if problem { Circle().fill(Color.orange).frame(width: 5, height: 5) }
+            }
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(slots.isEmpty ? Theme.dim : Theme.accent)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help(slots.isEmpty ? "Add an Audio Unit effect" : "Open this track's plugins")
+    }
+
+    private func label(_ slot: PluginSlot) -> String {
+        var s = slot.name
+        if slot.bypass { s += " (bypassed)" }
+        if let status = session.pluginStatus(slot) { s += " — " + (status == "Loading…" ? "loading" : "failed") }
+        return s
     }
 }

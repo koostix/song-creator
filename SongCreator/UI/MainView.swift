@@ -15,7 +15,7 @@ struct MainView: View {
             if session.showMixer {
                 Divider().overlay(Color.black)
                 MixerView(session: session)
-                    .frame(height: 430)
+                    .frame(height: 490)
                     .transition(.move(edge: .bottom))
             }
             StatusBar(session: session)
@@ -57,7 +57,7 @@ struct MainView: View {
             }
             if flags == .command {
                 switch event.charactersIgnoringModifiers?.lowercased() {
-                case "k": session.musicalTyping.toggle(); return nil
+                case "k": TypingToggle.toggle(session); return nil
                 case "c": session.copyRegions(); return nil
                 case "v": session.pasteRegions(); return nil
                 case "d": session.duplicateRegions(); return nil
@@ -107,14 +107,27 @@ struct MainView: View {
 struct StatusBar: View {
     @Bindable var session: Session
 
+    static func keysHint(_ s: Session) -> String {
+        let targets = s.midiTargets.map(\.name)
+        let to = targets.isEmpty ? "no MIDI track" : targets.joined(separator: ", ")
+        return "KEYS → \(to) · \(Session.noteName(12 * (s.typingOctave + 1))) · velocity \(s.typingVelocity) · A–' play · Z/X octave · C/V velocity · ⌘K off"
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             if let msg = session.message {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
-                Text(msg).lineLimit(1)
+                Text(msg).lineLimit(1).truncationMode(.middle)
+                if session.micDenied {
+                    Button("Open Microphone Settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+                    }
+                    .buttonStyle(.link)
+                }
                 Button("Dismiss") { session.message = nil }.buttonStyle(.link)
             } else {
                 Text(session.isRecording ? "Recording… press R or Space to stop"
+                     : session.musicalTyping ? StatusBar.keysHint(session)
                      : session.jamReady ? "JAM is on: press R to record one long take over the repeating loop. It's pasted out to match when you stop."
                      : "Space play · R record · ⇧M marker · L loop · T new track · X mixer · drag across a take lane to comp")
                     .foregroundStyle(Theme.dim)
@@ -130,37 +143,47 @@ struct StatusBar: View {
     }
 }
 
+/// Left to right in the order you work: song · transport · how you record · timing · then keys, view and output.
 struct TransportBar: View {
     @Bindable var session: Session
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 14) {
-            Button { model.closeSong() } label: { Image(systemName: "chevron.left") }
-                .buttonStyle(.plain).foregroundStyle(Theme.dim).help("Back to songs")
-            TextField("Song name", text: $session.song.name)
-                .textFieldStyle(.plain).font(.headline).frame(width: 170)
-
-            HStack(spacing: 2) {
-                Button { session.undo() } label: { Image(systemName: "arrow.uturn.backward") }
-                    .disabled(!session.canUndo).help("Undo (⌘Z)")
-                Button { session.redo() } label: { Image(systemName: "arrow.uturn.forward") }
-                    .disabled(!session.canRedo).help("Redo (⇧⌘Z)")
+        HStack(spacing: 10) {
+            // Song
+            HStack(spacing: 8) {
+                Button { model.closeSong() } label: { Image(systemName: "chevron.left") }
+                    .buttonStyle(.plain).foregroundStyle(Theme.dim).help("Back to songs (⌘O)")
+                RenameField(text: session.song.name, font: .system(size: 13, weight: .bold)) { name in
+                    session.edit { $0.name = name }
+                }
+                .frame(minWidth: 70, maxWidth: 170)
+                HStack(spacing: 6) {
+                    Button { session.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                        .disabled(!session.canUndo).help("Undo (⌘Z)")
+                    Button { session.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+                        .disabled(!session.canRedo).help("Redo (⇧⌘Z)")
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(Theme.text)
+            .layoutPriority(-1)
 
-            HStack(spacing: 6) {
+            BarDivider()
+
+            // Transport
+            HStack(spacing: 5) {
                 TransportButton(icon: "backward.end.fill", help: "Go to start (Return)") { session.goToStart() }
                 TransportButton(icon: session.isPlaying ? "stop.fill" : "play.fill",
                                 active: session.isPlaying && !session.isRecording, help: "Play / Stop (Space)") { session.togglePlay() }
                 TransportButton(icon: "record.circle.fill", active: session.isRecording, activeColor: Theme.record,
                                 tint: Theme.record, help: "Record (R)") { session.toggleRecord() }
+                PositionDisplay(session: session, playhead: session.playhead)
             }
 
-            PositionDisplay(session: session, playhead: session.playhead)
+            BarDivider()
 
+            // How you record
             HStack(spacing: 4) {
                 LitButton(label: "LOOP", on: session.song.loopEnabled, color: Theme.loop, width: 40,
                           help: "Cycle (L). Drag in the ruler to set the range.") { session.toggleLoop() }
@@ -172,57 +195,92 @@ struct TransportBar: View {
                           help: "Auto punch (P). Select a range and press ⇧P to set it.") { session.edit { $0.punchEnabled.toggle() } }
                 LitButton(label: "CLICK", on: session.song.clickEnabled, color: Theme.accent, width: 42,
                           help: "Metronome (C)") { session.song.clickEnabled.toggle() }
-                Menu {
-                    Picker("Count-in", selection: $session.song.countInBars) {
-                        Text("No count-in").tag(0)
-                        Text("1 bar").tag(1)
-                        Text("2 bars").tag(2)
-                    }
-                    Toggle("Click only while recording", isOn: $session.song.clickOnlyWhileRecording)
-                    Divider()
-                    Text("Click volume")
-                    Slider(value: $session.song.clickVolume, in: 0...1)
-                } label: {
-                    Text(session.song.countInBars == 0 ? "No count" : "Count \(session.song.countInBars)")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                }
-                .menuStyle(.borderlessButton).fixedSize()
+                RecordOptionsMenu(session: session)
             }
 
-            TempoControl(session: session)
-            TunerButton(session: session)
+            BarDivider()
 
-            Spacer(minLength: 0)
-
-            Picker("After take", selection: $session.song.autoArm) {
-                ForEach(AutoArmMode.allCases) { Text($0.label).tag($0) }
+            // Timing
+            HStack(spacing: 6) {
+                TempoControl(session: session)
+                TunerButton(session: session)
             }
-            .frame(width: 210)
-            .help("What happens after each recording pass")
 
-            HStack(spacing: 2) {
+            Spacer(minLength: 4)
+
+            // Play, view, output
+            TypingToggle(session: session)
+            BarDivider()
+            HStack(spacing: 8) {
                 Button { session.pixelsPerSecond = max(4, session.pixelsPerSecond / 1.4) } label: { Image(systemName: "minus.magnifyingglass") }
+                    .help("Zoom out (-)")
                 Button { session.pixelsPerSecond = min(800, session.pixelsPerSecond * 1.4) } label: { Image(systemName: "plus.magnifyingglass") }
+                    .help("Zoom in (=)")
                 Button { session.zoomToFit() } label: { Image(systemName: "arrow.left.and.right.square") }
                     .help("Zoom to fit the whole song (Z)")
             }
             .buttonStyle(.plain).foregroundStyle(Theme.dim)
-
-            TypingToggle(session: session)
-
+            BarDivider()
             LitButton(label: "MIX", on: session.showMixer, width: 34, help: "Mixer (X)") {
                 withAnimation(.easeOut(duration: 0.15)) { session.showMixer.toggle() }
             }
             Button {
                 NotificationCenter.default.post(name: .showExport, object: nil)
             } label: {
-                Label("Mixdown", systemImage: "square.and.arrow.up")
+                HStack(spacing: 4) {
+                    Image(systemName: "square.and.arrow.up")
+                    Text("Mixdown")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .padding(.horizontal, 8).frame(height: 24)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.1)))
             }
-            .help("Export mixdown (⌘E)")
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help("Export a mixdown (⌘E)")
         }
         .padding(.horizontal, 12)
         .frame(height: 52)
         .background(Theme.panel)
+    }
+}
+
+struct BarDivider: View {
+    var body: some View { Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 26) }
+}
+
+/// Count-in, what happens after a take, and click settings: set once, rarely touched.
+struct RecordOptionsMenu: View {
+    @Bindable var session: Session
+
+    var body: some View {
+        Menu {
+            Picker("Count-in", selection: $session.song.countInBars) {
+                Text("No count-in").tag(0)
+                Text("1 bar").tag(1)
+                Text("2 bars").tag(2)
+            }
+            Picker("After a take", selection: $session.song.autoArm) {
+                ForEach(AutoArmMode.allCases) { Text($0.label).tag($0) }
+            }
+            Divider()
+            Toggle("Click only while recording", isOn: $session.song.clickOnlyWhileRecording)
+            Menu("Click volume") {
+                ForEach([0.25, 0.5, 0.75, 1.0], id: \.self) { v in
+                    Button("\(Int(v * 100))%\(abs(session.song.clickVolume - v) < 0.01 ? " ✓" : "")") { session.song.clickVolume = v }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "slider.horizontal.3")
+                Text(session.song.countInBars == 0 ? "–" : "\(session.song.countInBars)")
+                if session.song.autoArm != .off { Image(systemName: "arrow.turn.down.right") }
+            }
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(Theme.text)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help("Recording options: count-in (\(session.song.countInBars == 0 ? "off" : "\(session.song.countInBars) bar")), after a take (\(session.song.autoArm.label.lowercased())), click")
     }
 }
 
@@ -276,31 +334,50 @@ struct TempoControl: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             VStack(spacing: 0) {
                 TextField("", text: $text)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
                     .multilineTextAlignment(.center)
-                    .frame(width: 54)
+                    .frame(width: 46)
                     .focused($focused)
                     .onSubmit(commit)
-                Text("BPM").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.dim)
+                Text("BPM").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.dim).fixedSize()
             }
-            Stepper("", value: Binding(get: { session.song.tempo },
-                                       set: { v in session.edit { $0.tempo = min(300, max(30, v.rounded())) } }),
-                     in: 30...300).labelsHidden()
-            Button("TAP") { session.tapTempo() }
-                .font(.system(size: 10, weight: .bold)).buttonStyle(.bordered).controlSize(.small)
-            Picker("", selection: Binding(get: { session.song.beatsPerBar },
-                                          set: { v in session.edit { $0.beatsPerBar = v } })) {
-                ForEach(2...7, id: \.self) { Text("\($0)/4").tag($0) }
+            VStack(spacing: 1) {
+                Button { nudge(1) } label: { Image(systemName: "chevron.up") }
+                Button { nudge(-1) } label: { Image(systemName: "chevron.down") }
             }
-            .labelsHidden().frame(width: 58)
+            .buttonStyle(.plain)
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(Theme.dim)
+            .help("Tempo ±1 (⌥ for ±0.1)")
+            Button { session.tapTempo() } label: {
+                Text("TAP").font(.system(size: 10, weight: .bold))
+                    .frame(width: 32, height: 18)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.1)))
+            }
+            .buttonStyle(.plain)
+            .help("Tap 3 or more times to set the tempo")
+            Menu {
+                ForEach(2...7, id: \.self) { n in
+                    Button("\(n)/4") { session.edit { $0.beatsPerBar = n } }
+                }
+            } label: {
+                Text("\(session.song.beatsPerBar)/4").font(.system(size: 12, weight: .semibold, design: .monospaced))
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("Time signature")
         }
         .onAppear { text = format(session.song.tempo) }
         .onChange(of: session.song.tempo) { _, v in if !focused { text = format(v) } }
         .onChange(of: focused) { _, f in if !f { commit() } }
+    }
+
+    private func nudge(_ dir: Double) {
+        let step = NSEvent.modifierFlags.contains(.option) ? 0.1 : 1
+        session.edit { $0.tempo = min(300, max(30, (($0.tempo + dir * step) * 10).rounded() / 10)) }
     }
 
     private func format(_ v: Double) -> String { v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v) }
@@ -395,11 +472,17 @@ struct TunerButton: View {
 struct TypingToggle: View {
     @Bindable var session: Session
 
+    /// Turning KEYS on also takes keyboard focus away from text fields, so letters reach the notes.
+    static func toggle(_ session: Session) {
+        session.musicalTyping.toggle()
+        if session.musicalTyping { NSApp.keyWindow?.makeFirstResponder(nil) }
+    }
+
     var body: some View {
         HStack(spacing: 4) {
             LitButton(label: "KEYS", on: session.musicalTyping, color: .purple, width: 40,
-                      help: "Play MIDI from your computer keyboard (⌘K). A–' play notes (W, E, T, Y, U, O, P are black keys), Z/X change octave, C/V change velocity. Notes go to armed MIDI tracks, or the selected MIDI track if none are armed.") {
-                session.musicalTyping.toggle()
+                      help: "Play MIDI from your computer keyboard (⌘K). A–' play notes (W, E, T, Y, U, O, P are black keys), Z/X change octave, C/V change velocity. Notes go to armed MIDI tracks, or the selected (or first) MIDI track if none are armed.") {
+                TypingToggle.toggle(session)
             }
             if session.musicalTyping {
                 Button { session.typingOctave = max(0, session.typingOctave - 1) } label: { Image(systemName: "chevron.left") }
@@ -408,9 +491,7 @@ struct TypingToggle: View {
                     .font(.system(size: 10, weight: .bold, design: .monospaced)).frame(width: 26)
                 Button { session.typingOctave = min(8, session.typingOctave + 1) } label: { Image(systemName: "chevron.right") }
                     .help("Octave up (X)")
-                Text("v\(session.typingVelocity)")
-                    .font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.dim)
-                    .help("Velocity (C / V)")
+
             }
         }
         .buttonStyle(.plain)

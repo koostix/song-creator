@@ -1,9 +1,74 @@
 #if DEBUG
 import AVFoundation
+import SwiftUI
 
 /// `SongCreator --selftest <folder>`: builds songs in code, renders them offline and
 /// checks that audio lands where the arrangement says. Prints results and exits.
 enum SelfTest {
+    /// `SongCreator --snapshot <folder>`: render the main window at a few widths to PNGs for layout checks.
+    static func snapshotIfRequested() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        DispatchQueue.main.async {
+            let project = dir.appendingPathComponent("Snapshot Song")
+            try? FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+            var song = Song.newIdea()
+            song.name = "Idea Oct 21 1.27 AM"
+            song.tracks.append(Track(name: "Track 3", colorIndex: 2))
+            var keys = Track(name: "Keys 4", kind: .midi, colorIndex: 3, channels: 2)
+            keys.inserts = [PluginSlot(name: "AUDelay", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                       subType: kAudioUnitSubType_Delay, manufacturerCode: kAudioUnitManufacturer_Apple)]
+            song.tracks.append(keys)
+            song.tracks.append(Track(name: "synth", kind: .midi, colorIndex: 4, channels: 2))
+            song.loop = TimeRange(start: 0, end: 8)
+            let model = AppModel()
+            let session = Session(projectURL: project, song: song)
+            session.jamMode = true
+            session.musicalTyping = true
+            for (w, mixer) in [(1180.0, false), (1600.0, false), (1180.0, true)] {
+                session.showMixer = mixer
+                let view = MainView(session: session).environment(model)
+                    .frame(width: w, height: mixer ? 900 : 640)
+                let r = ImageRenderer(content: view)
+                r.scale = 1
+                if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: dir.appendingPathComponent("main-\(Int(w))\(mixer ? "-mixer" : "").png"))
+                }
+            }
+            // Scroll views don't render offscreen, so draw track rows and mixer strips directly.
+            session.showMixer = false
+            let parts: [(String, AnyView, CGSize)] = [
+                ("tracks", AnyView(VStack(spacing: 0) {
+                    ForEach(session.song.tracks) { t in
+                        TrackRow(session: session, track: t)
+                        Divider().overlay(Color.black.opacity(0.6))
+                    }
+                    AddTrackRow(session: session)
+                }.background(Theme.lane)), CGSize(width: 900, height: 480)),
+                ("strips", AnyView(HStack(alignment: .top, spacing: 2) {
+                    ForEach(session.song.tracks) { t in ChannelStripView(session: session, track: t) }
+                    ReturnsStrip(session: session)
+                    MasterStrip(session: session)
+                }.padding(6).background(Theme.background).environment(\.continuousEdit, session.continuousEdit)),
+                 CGSize(width: 760, height: 490)),
+            ]
+            for (name, v, size) in parts {
+                let r = ImageRenderer(content: v.environment(model).frame(width: size.width, height: size.height, alignment: .topLeading)
+                    .preferredColorScheme(.dark))
+                r.scale = 1
+                if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: dir.appendingPathComponent("\(name).png"))
+                }
+            }
+            print("SNAPSHOT DONE")
+            exit(0)
+        }
+    }
+
     static func runIfRequested() {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--selftest"), i + 1 < args.count else { return }
@@ -170,8 +235,6 @@ enum SelfTest {
         song.clickEnabled = false
         song.master.limiterOn = false
         audio.build(song: song, inputDevice: nil, outputDevice: nil)
-        let sr = audio.sampleRate
-        print("  sample rate \(sr)")
         // A device change rebuilds the engine while the old one is still alive (the configuration-change
         // notification holds it). Shared nodes must move over without AVAudioEngine throwing.
         let oldEngine = audio.engine
@@ -179,6 +242,10 @@ enum SelfTest {
         audio.build(song: song, inputDevice: nil, outputDevice: nil)
         try check(oldEngine !== audio.engine && audio.masterMixer.engine === audio.engine,
                   "engine rebuilds while the old engine is still alive")
+        let sr = audio.sampleRate
+        print("  sample rate \(sr)\(audio.inputProblem.map { " — " + $0 } ?? "")")
+        try check(!audio.hasInput || audio.inputSampleRate == sr,
+                  "input is only opened when it matches the output rate")
 
         func tone(_ name: String, _ freq: Double) throws {
             let f = try Recorder.makeFile(url: audioDir.appendingPathComponent(name), sampleRate: sr, channels: 1)
@@ -283,6 +350,11 @@ enum SelfTest {
         try check(lp440 > 0.005 && lp880 < lp440 * 0.6, "insert plugin processes the audio")
         try check(mix.window(6.1, 6.8).rms > 0.002, "MIDI plays through the AU instrument")
         try check(audio.pluginState(lowpass.id) != nil, "plugin state can be saved")
+        PluginWindows.open(audio.unit(lowpass.id)!, slot: lowpass.id, title: "AULowpass — test")
+        let openDeadline = Date().addingTimeInterval(5)
+        while Date() < openDeadline, !PluginWindows.isOpen(lowpass.id) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        try check(PluginWindows.isOpen(lowpass.id), "a loaded plugin's editor window opens")
+        PluginWindows.close(lowpass.id)
 
         // A device change mid-session: plugins reload into the new engine with their settings.
         audio.build(song: song, inputDevice: nil, outputDevice: nil)
@@ -319,7 +391,29 @@ enum SelfTest {
         try check(session.song.tracks[0].strip.volumeDB == 0, "a fader move undoes in one step")
 
         print("Musical typing and zoom")
+        session.selectedTrackID = session.song.tracks[0].id   // an audio track, as in a new song
         session.musicalTyping = true
+        try check(session.song.tracks.contains { $0.kind == .midi } && session.midiTargets.count == 1,
+                  "KEYS adds a MIDI track when the song has none")
+        // Typed notes must actually sound, even with an audio track selected.
+        let eng = session.audio.engine
+        try session.audio.enableOfflineRendering()
+        try eng.start()
+        session.selectedTrackID = session.song.tracks[0].id
+        _ = session.typingKeyDown("h", keyCode: 4, isRepeat: false)   // A above middle C
+        let kb = AVAudioPCMBuffer(pcmFormat: eng.manualRenderingFormat, frameCapacity: 4096)!
+        var sum = 0.0, count = 0
+        for _ in 0..<8 {
+            _ = try eng.renderOffline(4096, to: kb)
+            for i in 0..<Int(kb.frameLength) { sum += Double(kb.floatChannelData![0][i] * kb.floatChannelData![0][i]) }
+            count += Int(kb.frameLength)
+        }
+        _ = session.typingKeyUp(keyCode: 4)
+        eng.stop()
+        eng.disableManualRenderingMode()
+        let typedRMS = sqrt(sum / Double(max(1, count)))
+        print(String(format: "  typed note rms %.4f", typedRMS))
+        try check(typedRMS > 0.002, "a typed note plays through the MIDI track's instrument")
         try check(session.typingKeyDown("a", keyCode: 0, isRepeat: false) && session.typingKeyDown("k", keyCode: 40, isRepeat: false),
                   "A and K are note keys")
         try check(!session.typingKeyDown("r", keyCode: 15, isRepeat: false), "R stays free for record")

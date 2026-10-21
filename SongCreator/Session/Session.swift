@@ -75,6 +75,7 @@ final class Session {
     private(set) var inputChannelCount = 0
     private(set) var sampleRate: Double = 48000
     private(set) var midiSources: [String] = []
+    private(set) var micDenied = false
     var inputUID: String? = Prefs.inputUID
     var outputUID: String? = Prefs.outputUID
 
@@ -106,12 +107,22 @@ final class Session {
     @ObservationIgnored private var midiEvents: [(UInt8, UInt8, UInt8, UInt64)] = []
     @ObservationIgnored private var midiRecording = false
     @ObservationIgnored private var armedMIDI: [UUID] = []
-    /// The selected track if it's a MIDI track (read from the MIDI thread under midiLock).
-    @ObservationIgnored private var selectedMIDI: UUID?
+    /// Where notes go when no MIDI track is armed: the selected MIDI track, else the first one.
+    /// Read from the MIDI thread under midiLock.
+    @ObservationIgnored private var fallbackMIDI: UUID?
 
     private func updateSelectedMIDI() {
-        let id = song.tracks.first { $0.id == selectedTrackID && $0.kind == .midi }?.id
-        midiLock.lock(); selectedMIDI = id; midiLock.unlock()
+        let midiTracks = song.tracks.filter { $0.kind == .midi }
+        let id = (midiTracks.first { $0.id == selectedTrackID } ?? midiTracks.first)?.id
+        midiLock.lock(); fallbackMIDI = id; midiLock.unlock()
+    }
+
+    /// Tracks that live MIDI (hardware or KEYS) plays right now.
+    var midiTargets: [Track] {
+        let armed = song.tracks.filter { $0.kind == .midi && $0.armed }
+        if !armed.isEmpty { return armed }
+        let midiTracks = song.tracks.filter { $0.kind == .midi }
+        return (midiTracks.first { $0.id == selectedTrackID } ?? midiTracks.first).map { [$0] } ?? []
     }
 
     /// JAM: recording over a loop plays it out straight (one long take) and pastes the loop out on stop.
@@ -196,7 +207,10 @@ final class Session {
         transport.update(song: song)
         recorder.installTap(on: audio)
         do { try audio.start() } catch { message = "Couldn't start audio: \(error.localizedDescription)" }
-        if audio.hasInput, audio.inputSampleRate != audio.sampleRate {
+        micDenied = audio.micDenied
+        if let problem = audio.inputProblem, song.tracks.contains(where: { $0.kind == .audio }) {
+            message = problem
+        } else if audio.hasInput, audio.inputSampleRate != audio.sampleRate {
             message = "Input runs at \(Int(audio.inputSampleRate)) Hz but output at \(Int(audio.sampleRate)) Hz. Set both to the same rate in Audio MIDI Setup."
         } else if song.sampleRate > 0, song.sampleRate != audio.sampleRate {
             message = "This song was recorded at \(Int(song.sampleRate)) Hz; your device is at \(Int(audio.sampleRate)) Hz. Switch the device to \(Int(song.sampleRate)) Hz to hear the audio."
@@ -227,7 +241,7 @@ final class Session {
         let kind = status & 0xF0
         guard kind == 0x80 || kind == 0x90 || kind == 0xB0 || kind == 0xE0 else { return }
         midiLock.lock()
-        let targets = armedMIDI.isEmpty ? (selectedMIDI.map { [$0] } ?? []) : armedMIDI
+        let targets = armedMIDI.isEmpty ? (fallbackMIDI.map { [$0] } ?? []) : armedMIDI
         if midiRecording { midiEvents.append((status, d1, d2, ts)) }
         midiLock.unlock()
         for t in targets { audio.sendMIDI(track: t, status: status, data1: d1, data2: d2) }
@@ -241,7 +255,16 @@ final class Session {
         "u": 10, "j": 11, "k": 12, "o": 13, "l": 14, "p": 15, ";": 16, "'": 17,
     ]
 
-    var musicalTyping = false { didSet { if !musicalTyping { releaseTypingNotes() } } }
+    var musicalTyping = false {
+        didSet {
+            if !musicalTyping { releaseTypingNotes(); return }
+            // Typed notes need an instrument to play: add a piano track if the song has none.
+            if !oldValue, !song.tracks.contains(where: { $0.kind == .midi }) {
+                addTrack(kind: .midi)
+                message = "Added a MIDI track for KEYS. Pick its sound in the track header."
+            }
+        }
+    }
     /// Octave of the A key; 4 means A plays middle C (MIDI 60).
     var typingOctave = 4
     var typingVelocity = 100
@@ -507,7 +530,7 @@ final class Session {
         }
         let audioTracks = song.tracks.filter { $0.armed && $0.kind == .audio }
         if !audioTracks.isEmpty && !audio.hasInput {
-            message = "No audio input found. Pick an input device in Settings."
+            message = audio.inputProblem ?? "No audio input found. Pick an input device in Settings."
             return
         }
         if !audioTracks.isEmpty && audio.inputSampleRate != audio.sampleRate {

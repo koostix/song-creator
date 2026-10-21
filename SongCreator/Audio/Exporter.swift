@@ -32,8 +32,7 @@ enum Exporter {
                        to url: URL, format: ExportFormat, progress: (Double) -> Void) throws {
         let engine = audio.engine
         let sr = audio.sampleRate
-        engine.stop()
-        try engine.enableManualRenderingMode(.offline, format: audio.stereo, maximumFrameCount: 4096)
+        try audio.enableOfflineRendering()
         defer {
             engine.stop()
             engine.disableManualRenderingMode()
@@ -54,6 +53,7 @@ enum Exporter {
         // Small blocks when automating so volume/pan changes land within ~10 ms.
         let block: Int64 = song.tracks.contains(where: \.hasAutomation) ? 512 : Int64(buffer.frameCapacity)
         var done: Int64 = 0
+        var stalls = 0
         while done < total {
             transport.fill(throughPlayerFrame: done + 16384)
             if block == 512 { audio.applyAutomation(song, at: range.start + Double(done) / sr) }
@@ -62,10 +62,14 @@ enum Exporter {
             case .success:
                 try out.write(from: buffer)
                 done += Int64(buffer.frameLength)
-            case .error:
-                throw CocoaError(.fileWriteUnknown)
-            default:
+                stalls = 0
+            case .cannotDoInCurrentContext:
+                // Transient; try again, but never spin forever.
+                stalls += 1
+                if stalls > 200 { throw CocoaError(.fileWriteUnknown) }
                 continue
+            default:
+                throw CocoaError(.fileWriteUnknown)
             }
             progress(Double(done) / Double(total))
         }
