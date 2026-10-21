@@ -25,6 +25,7 @@
 		8FBB7AFF0BEC887721F9A310 /* InputMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DBC32091D336ACF0D818027 /* InputMonitor.swift */; };
 		A75DA1F7E41CBBA032709E76 /* ArrangeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DDBF59D0E229E80E5C07AF1 /* ArrangeView.swift */; };
 		AD4795D588EEF158F8CC5C56 /* Plugins.swift in Sources */ = {isa = PBXBuildFile; fileRef = B232DFF457BAD244AEA58A25 /* Plugins.swift */; };
+		B783DE5CD1FEFEE575282C3C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BC4A6F69A0F3758D2BCE6A5E /* Assets.xcassets */; };
 		B78F40624B23D4DAD4E001DA /* ProjectBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05C328AAD080BE506DDE5824 /* ProjectBrowser.swift */; };
 		B7DE66E8DDD76A00E7B6C33F /* Controls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F3D23C9B0271C7A10538296 /* Controls.swift */; };
 		BA4184E89E5B3E63E0F48A5F /* MixerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 876A14DCDC35A3A3BDB37311 /* MixerView.swift */; };
@@ -58,6 +59,7 @@
 		AE775CD3838681742317CE31 /* SongCreatorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SongCreatorApp.swift; sourceTree = "<group>"; };
 		B232DFF457BAD244AEA58A25 /* Plugins.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Plugins.swift; sourceTree = "<group>"; };
 		B7AD962973BB7B9E79C5D9B6 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
+		BC4A6F69A0F3758D2BCE6A5E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C1928F150388FFB98EC6B47A /* TrackHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackHeader.swift; sourceTree = "<group>"; };
 		C42F92D298C36A0D16045A4D /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		C581404577FFF8EC4987A54F /* ChunkRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChunkRenderer.swift; sourceTree = "<group>"; };
@@ -119,6 +121,7 @@
 		75D1656390EEC745F6385886 /* SongCreator */ = {
 			isa = PBXGroup;
 			children = (
+				BC4A6F69A0F3758D2BCE6A5E /* Assets.xcassets */,
 				C26B63188D483D9958996950 /* App */,
 				704CE73F2E95A3CC15306411 /* Audio */,
 				A7B4E790D5258B077EF76D91 /* Model */,
@@ -165,6 +168,7 @@
 			buildConfigurationList = 7A3CB1243ED1912E9D8378A7 /* Build configuration list for PBXNativeTarget "SongCreator" */;
 			buildPhases = (
 				1347995A3544A3A2F6AC6ABE /* Sources */,
+				7084AD4ECA07BE60F2B96803 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -209,6 +213,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		7084AD4ECA07BE60F2B96803 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B783DE5CD1FEFEE575282C3C /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		1347995A3544A3A2F6AC6ABE /* Sources */ = {
