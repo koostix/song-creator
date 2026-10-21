@@ -230,9 +230,12 @@ final class Session {
         if message != nil, message == deviceMessage { message = nil }
         deviceMessage = nil
         let inDev = AudioDevices.device(uid: inputUID)?.id, outDev = AudioDevices.device(uid: outputUID)?.id
-        for dev in [inDev ?? AudioDevices.defaultDevice(input: true), outDev ?? AudioDevices.defaultDevice(input: false)] {
+        let resolvedIn = inDev ?? AudioDevices.defaultDevice(input: true)
+        let resolvedOut = outDev ?? AudioDevices.defaultDevice(input: false)
+        for dev in [resolvedIn, resolvedOut] {
             if let dev { AudioDevices.setBufferSize(dev, frames: bufferFrames) }
         }
+        alignSampleRates(input: inputEnabled ? resolvedIn : nil, output: resolvedOut)
         audio.build(song: song, inputDevice: inDev, outputDevice: outDev, inputEnabled: inputEnabled, bufferFrames: bufferFrames)
         sampleRate = audio.sampleRate
         inputChannelCount = audio.inputChannelCount
@@ -260,6 +263,22 @@ final class Session {
         }
         watchSpeakers()
         updateMonitorSafety()
+    }
+
+    /// The song's rate drives the hardware, like any DAW: a song with recordings switches the output
+    /// to its rate (otherwise its takes can't play), and the input follows the output so recording works.
+    /// A device that can't run at that rate (e.g. a 16 kHz Bluetooth mic) is left alone; build() then
+    /// explains why recording is off.
+    private func alignSampleRates(input: AudioDeviceID?, output: AudioDeviceID?) {
+        guard let output else { return }
+        let hasRecordings = song.tracks.contains { $0.takes.contains { $0.fileName != nil } }
+        if song.sampleRate > 0, hasRecordings, AudioDevices.sampleRate(output) != song.sampleRate {
+            AudioDevices.setSampleRate(output, song.sampleRate)
+        }
+        let target = AudioDevices.sampleRate(output)
+        if let input, input != output, target > 0, AudioDevices.sampleRate(input) != target {
+            AudioDevices.setSampleRate(input, target)
+        }
     }
 
     /// Re-check whether sound goes to the laptop speakers (and so whether monitoring must be muted).

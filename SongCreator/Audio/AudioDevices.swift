@@ -24,7 +24,8 @@ enum AudioDevices {
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr else { return [] }
         return ids.compactMap { id in
             guard let name = string(id, kAudioObjectPropertyName), let uid = string(id, kAudioDevicePropertyDeviceUID),
-                  !name.hasPrefix("CADefaultDeviceAggregate") else { return nil }   // AVAudioEngine's private aggregate
+                  !name.hasPrefix("CADefaultDeviceAggregate"),                    // AVAudioEngine's private aggregate
+                  !uid.hasPrefix("com.paulshuler.SongCreator.aggregate") else { return nil }   // ours
             return AudioDevice(id: id, uid: uid, name: name,
                                inputChannels: channels(id, kAudioDevicePropertyScopeInput),
                                outputChannels: channels(id, kAudioDevicePropertyScopeOutput))
@@ -135,6 +136,31 @@ enum AudioDevices {
     }
 
     static func name(_ id: AudioDeviceID) -> String? { all().first { $0.id == id }?.name }
+
+    /// Whether the device can run at `rate` (checks its list of supported rates and ranges).
+    static func supports(_ id: AudioDeviceID, rate: Double) -> Bool {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyAvailableNominalSampleRates,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size > 0 else { return false }
+        var ranges = [AudioValueRange](repeating: AudioValueRange(), count: Int(size) / MemoryLayout<AudioValueRange>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &ranges) == noErr else { return false }
+        return ranges.contains { rate >= $0.mMinimum - 0.5 && rate <= $0.mMaximum + 0.5 }
+    }
+
+    /// Switch a device to `rate` and wait (briefly) until it reports the new rate. Returns success.
+    @discardableResult
+    static func setSampleRate(_ id: AudioDeviceID, _ rate: Double) -> Bool {
+        if sampleRate(id) == rate { return true }
+        guard supports(id, rate: rate) else { return false }
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value = Float64(rate)
+        guard AudioObjectSetPropertyData(id, &addr, 0, nil, UInt32(MemoryLayout<Float64>.size), &value) == noErr else { return false }
+        let deadline = Date().addingTimeInterval(1.5)
+        while sampleRate(id) != rate && Date() < deadline { usleep(10_000) }
+        return sampleRate(id) == rate
+    }
 
     static func uid(_ id: AudioDeviceID) -> String? { string(id, kAudioDevicePropertyDeviceUID) }
 
