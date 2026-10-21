@@ -64,6 +64,34 @@ enum SelfTest {
                     try? png.write(to: dir.appendingPathComponent("\(name).png"))
                 }
             }
+            // The song list, with a small sample library.
+            ProjectStore.rootOverride = dir.appendingPathComponent("Library")
+            try? FileManager.default.removeItem(at: ProjectStore.root)
+            for (name, project, status, fav) in [("Morning Riff", nil, SongStatus.writing, true),
+                                                 ("Night Drive", "Album", .mixing, false),
+                                                 ("Glass Hearts", "Album", .done, true),
+                                                 ("Idea Oct 21 1.27 AM", nil, .idea, false)] as [(String, String?, SongStatus, Bool)] {
+                var song = Song.newIdea()
+                song.name = name
+                try? FileManager.default.createDirectory(at: SongLibrary.folder(for: project), withIntermediateDirectories: true)
+                if let url = try? ProjectStore.create(song, in: SongLibrary.folder(for: project)) {
+                    var info = SongInfo(); info.status = status; info.favorite = fav; info.notes = "Chorus needs a lift"
+                    try? SongLibrary.writeInfo(info, to: url)
+                }
+            }
+            model.library.refresh()
+            let browser = ProjectBrowser().environment(model).frame(width: 1180, height: 640).preferredColorScheme(.dark)
+            let details = SongDetails(song: model.library.songs.first { $0.name == "Night Drive" }!,
+                                      selection: .constant([]), confirmTrash: .constant([]))
+                .environment(model).frame(width: 290, height: 640).background(Theme.panel).preferredColorScheme(.dark)
+            for (name, v) in [("browser", AnyView(browser)), ("details", AnyView(details))] {
+                let r = ImageRenderer(content: v)
+                r.scale = 1
+                if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: dir.appendingPathComponent("\(name).png"))
+                }
+            }
             print("SNAPSHOT DONE")
             exit(0)
         }
@@ -433,6 +461,61 @@ enum SelfTest {
         session.scrollX = 30
         session.zoomToFit()
         try check(session.scrollX == 0 && abs(session.pixelsPerSecond * 60 * 1.04 - 1000) < 0.01, "zoom to fit shows the whole song")
+
+        print("Song library")
+        let libRoot = dir.appendingPathComponent("Library")
+        ProjectStore.rootOverride = libRoot
+        defer { ProjectStore.rootOverride = nil }
+        let lib = SongLibrary()
+        var songA = Song.newIdea(); songA.name = "Morning Riff"; songA.tempo = 92
+        var songB = Song.newIdea(); songB.name = "Night Drive"
+        _ = try ProjectStore.create(songA)
+        try FileManager.default.createDirectory(at: libRoot.appendingPathComponent("Album"), withIntermediateDirectories: true)
+        _ = try ProjectStore.create(songB, in: SongLibrary.folder(for: "Album"))
+        lib.refresh()
+        try check(lib.songs.count == 2 && lib.projects == ["Album"] && lib.count(.ungrouped) == 1 && lib.count(.project("Album")) == 1,
+                  "finds songs at the top and inside projects")
+        let riff = lib.songs.first { $0.name == "Morning Riff" }!
+        try check(riff.tempo == 92 && riff.info.status == .idea, "reads song details and default status")
+        lib.update(riff) { $0.status = .mixing; $0.favorite = true; $0.notes = "needs a bridge" }
+        lib.refresh()
+        let riff2 = lib.songs.first { $0.name == "Morning Riff" }!
+        try check(riff2.info.status == .mixing && riff2.info.favorite && lib.count(.favorites) == 1,
+                  "status, favorite and notes persist in info.json")
+        try check(lib.songs(in: .all, search: "bridge", status: nil).count == 1 &&
+                  lib.songs(in: .all, search: "", status: .mixing).count == 1, "search covers notes; status filter works")
+        let renamed = lib.rename(riff2, to: "Sunrise")
+        try check(renamed?.lastPathComponent == "Sunrise" && (try? ProjectStore.load(renamed!).name) == "Sunrise"
+                  && SongLibrary.readInfo(renamed!).notes == "needs a bridge", "rename moves the folder and keeps details")
+        let sunrise = lib.songs.first { $0.name == "Sunrise" }!
+        let movedTo = lib.move(sunrise, to: "Album")
+        try check(movedTo?.deletingLastPathComponent().lastPathComponent == "Album" && lib.count(.project("Album")) == 2,
+                  "move into a project")
+        let copy = lib.duplicate(lib.songs.first { $0.name == "Sunrise" }!)
+        let copySong = copy.flatMap { try? ProjectStore.load($0) }
+        try check(copySong?.name == "Sunrise copy" && lib.songs.count == 3
+                  && copySong?.id != lib.songs.first { $0.name == "Sunrise" }.flatMap { try? ProjectStore.load($0.url) }?.id,
+                  "duplicate makes an independent copy")
+        // Several songs at once.
+        lib.refresh()
+        let pair = lib.songs.filter { $0.project == "Album" }
+        let out = lib.move(pair, to: nil)
+        try check(out.count == pair.count && lib.count(.project("Album")) == 0 && lib.count(.ungrouped) == lib.songs.count,
+                  "move several songs out of a project at once")
+        let movedBack = lib.move(lib.songs.filter { out.contains($0.url) }, to: "Album")
+        try check(movedBack.count == pair.count && lib.count(.project("Album")) == pair.count, "and back into it")
+        lib.update(lib.songs) { $0.status = .done }
+        lib.refresh()
+        try check(lib.songs.allSatisfy { $0.info.status == .done }, "set status on several songs")
+        let tok = SongLibrary.dragToken(lib.songs[0].url)
+        try check(SongLibrary.url(fromDragToken: tok)?.standardizedFileURL == lib.songs[0].url.standardizedFileURL
+                  && SongLibrary.url(fromDragToken: "/Users/x") == nil, "drag token round-trips; plain text is ignored")
+
+        let ep = lib.createProject("EP")
+        let ep2 = lib.createProject("EP")
+        try check(ep == "EP" && ep2 == "EP 2", "new projects get unique names")
+        let renamedProject = lib.renameProject("EP 2", to: "Live Session")
+        try check(renamedProject == "Live Session" && lib.projects.contains("Live Session"), "rename a project")
 
         print("Auto-arm monitoring")
         for mode in [AutoArmMode.newTrack, .nextTrack] {

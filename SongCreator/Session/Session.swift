@@ -26,6 +26,11 @@ enum Prefs {
         get { defaults.object(forKey: "bufferFrames") as? Int ?? 256 }
         set { defaults.set(newValue, forKey: "bufferFrames") }
     }
+    /// The project selected in the song list; New Song goes there.
+    static var libraryProject: String? {
+        get { defaults.string(forKey: "libraryProject") }
+        set { defaults.set(newValue, forKey: "libraryProject") }
+    }
     static var jamMode: Bool {
         get { defaults.bool(forKey: "jamMode") }
         set { defaults.set(newValue, forKey: "jamMode") }

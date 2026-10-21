@@ -5,32 +5,35 @@ import SwiftUI
 @Observable
 final class AppModel {
     var session: Session?
-    var projects: [ProjectInfo] = []
+    let library = SongLibrary()
+    let player = MixdownPlayer()
     var error: String?
 
     init() { refresh() }
 
-    func refresh() { projects = ProjectStore.list() }
+    func refresh() { library.refresh() }
 
-    func newSong() {
+    /// Start a new song, inside `project` if one is given.
+    func newSong(in project: String? = nil) {
         let song = Song.newIdea()
         do {
-            let url = try ProjectStore.create(song)
+            let url = try ProjectStore.create(song, in: SongLibrary.folder(for: project))
             open(url: url, song: song)
         } catch {
             self.error = "Couldn't create the song: \(error.localizedDescription)"
         }
     }
 
-    func open(_ info: ProjectInfo) {
+    func open(_ entry: SongEntry) {
         do {
-            open(url: info.url, song: try ProjectStore.load(info.url))
+            open(url: entry.url, song: try ProjectStore.load(entry.url))
         } catch {
-            self.error = "Couldn't open \(info.name): \(error.localizedDescription)"
+            self.error = "Couldn't open \(entry.name): \(error.localizedDescription)"
         }
     }
 
     private func open(url: URL, song: Song) {
+        player.stop()
         session?.close()
         session = Session(projectURL: url, song: song)
     }
@@ -64,7 +67,7 @@ struct SongCreatorApp: App {
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New Song") { model.newSong() }.keyboardShortcut("n")
+                Button("New Song") { model.newSong(in: Prefs.libraryProject) }.keyboardShortcut("n")
                 Button("Song List") { model.closeSong() }.keyboardShortcut("o")
                     .disabled(model.session == nil)
             }

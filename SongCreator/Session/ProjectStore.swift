@@ -1,18 +1,14 @@
 import AVFoundation
 import Foundation
 
-struct ProjectInfo: Identifiable, Hashable {
-    let url: URL
-    let name: String
-    let modified: Date
-    var id: URL { url }
-}
-
-/// Songs live in ~/Music/Song Creator/<name>/ with song.json and an Audio folder.
+/// Songs live in ~/Music/Song Creator/<song>/ (or <project>/<song>/) with song.json and an Audio folder.
 enum ProjectStore {
+    /// Tests point the library somewhere else.
+    static var rootOverride: URL?
+
     static var root: URL {
         let music = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first!
-        let url = music.appendingPathComponent("Song Creator", isDirectory: true)
+        let url = rootOverride ?? music.appendingPathComponent("Song Creator", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
@@ -29,28 +25,23 @@ enum ProjectStore {
         return url
     }
 
-    static func list() -> [ProjectInfo] {
-        let fm = FileManager.default
-        let dirs = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
-        return dirs.compactMap { dir in
-            let file = songFile(dir)
-            guard let attrs = try? fm.attributesOfItem(atPath: file.path) else { return nil }
-            return ProjectInfo(url: dir, name: dir.lastPathComponent,
-                               modified: attrs[.modificationDate] as? Date ?? .distantPast)
-        }
-        .sorted { $0.modified > $1.modified }
-    }
-
-    static func create(_ song: Song) throws -> URL {
-        var url = root.appendingPathComponent(sanitize(song.name), isDirectory: true)
-        var n = 2
-        while FileManager.default.fileExists(atPath: url.path) {
-            url = root.appendingPathComponent("\(sanitize(song.name)) \(n)", isDirectory: true)
-            n += 1
-        }
+    /// Create a song folder in `folder` (the library root or a project folder).
+    static func create(_ song: Song, in folder: URL? = nil) throws -> URL {
+        let url = uniqueURL(in: folder ?? root, name: sanitize(song.name))
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         _ = audioFolder(url)
         try save(song, to: url)
+        return url
+    }
+
+    /// "Name", or "Name 2", "Name 3"… if taken.
+    static func uniqueURL(in folder: URL, name: String) -> URL {
+        var url = folder.appendingPathComponent(name, isDirectory: true)
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = folder.appendingPathComponent("\(name) \(n)", isDirectory: true)
+            n += 1
+        }
         return url
     }
 
