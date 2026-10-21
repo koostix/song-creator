@@ -613,12 +613,15 @@ final class Session {
         return notes.sorted { $0.on < $1.on }
     }
 
-    private func applyAutoArm(_ s: inout Song, recorded: [UUID]) {
+    func applyAutoArm(_ s: inout Song, recorded: [UUID]) {
         guard s.autoArm != .off, let lastID = recorded.last, let li = s.trackIndex(lastID) else { return }
         let template = s.tracks[li]
         for i in s.tracks.indices { s.tracks[i].armed = false }
+        // Monitoring follows the arm: the recorded tracks go quiet, the next one listens.
+        for id in recorded { if let i = s.trackIndex(id) { s.tracks[i].monitor = false } }
         if s.autoArm == .nextTrack, li + 1 < s.tracks.count, s.tracks[li + 1].kind == template.kind {
             s.tracks[li + 1].armed = true
+            s.tracks[li + 1].monitor = template.kind == .audio
             selectedTrackID = s.tracks[li + 1].id
             return
         }
@@ -626,6 +629,7 @@ final class Session {
                       colorIndex: (template.colorIndex + 1) % TrackPalette.count, channels: template.channels,
                       inputChannel: template.inputChannel, armed: true, program: template.program)
         t.strip = ChannelStrip()
+        t.monitor = template.kind == .audio
         s.tracks.insert(t, at: li + 1)
         selectedTrackID = t.id
     }

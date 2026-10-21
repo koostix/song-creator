@@ -299,6 +299,19 @@ enum SelfTest {
         session.continuousEdit(false)
         session.undo()
         try check(session.song.tracks[0].strip.volumeDB == 0, "a fader move undoes in one step")
+
+        print("Auto-arm monitoring")
+        for mode in [AutoArmMode.newTrack, .nextTrack] {
+            var s = Song.newIdea()
+            s.autoArm = mode
+            s.tracks[0].monitor = true
+            s.tracks.append(Track(name: "Track 2"))
+            session.applyAutoArm(&s, recorded: [s.tracks[0].id])
+            let armed = s.tracks.filter(\.armed)
+            try check(!s.tracks[0].monitor && !s.tracks[0].armed && armed.count == 1 && armed[0].monitor
+                      && armed[0].id != s.tracks[0].id,
+                      "\(mode.label): recorded track stops monitoring, the armed one starts")
+        }
     }
 }
 
