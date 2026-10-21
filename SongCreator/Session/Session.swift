@@ -1,0 +1,947 @@
+import AVFoundation
+import Observation
+import SwiftUI
+
+/// Kept separate so only the views that draw the playhead redraw at 30 fps.
+@Observable
+final class PlayheadModel {
+    var position: Double = 0
+}
+
+enum Prefs {
+    static let defaults = UserDefaults.standard
+    static var latencyOffsetMs: Double {
+        get { defaults.object(forKey: "latencyOffsetMs") as? Double ?? 0 }
+        set { defaults.set(newValue, forKey: "latencyOffsetMs") }
+    }
+    static var returnOnStop: Bool {
+        get { defaults.object(forKey: "returnOnStop") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "returnOnStop") }
+    }
+    static var inputUID: String? {
+        get { defaults.string(forKey: "inputUID") }
+        set { defaults.set(newValue, forKey: "inputUID") }
+    }
+    static var bufferFrames: Int {
+        get { defaults.object(forKey: "bufferFrames") as? Int ?? 256 }
+        set { defaults.set(newValue, forKey: "bufferFrames") }
+    }
+    static var tunerA4: Double {
+        get { defaults.object(forKey: "tunerA4") as? Double ?? 440 }
+        set { defaults.set(newValue, forKey: "tunerA4") }
+    }
+    static var outputUID: String? {
+        get { defaults.string(forKey: "outputUID") }
+        set { defaults.set(newValue, forKey: "outputUID") }
+    }
+}
+
+@Observable
+final class Session {
+    var song: Song {
+        didSet { songDidChange(from: oldValue) }
+    }
+    let projectURL: URL
+    let audioFolder: URL
+
+    // Transport
+    private(set) var isPlaying = false
+    private(set) var isRecording = false
+    let playhead = PlayheadModel()
+    /// Where the last play started; Stop returns here when `returnOnStop` is on.
+    private(set) var playStart: Double = 0
+
+    // Editing / view state
+    var selection: TimeRange?
+    var selectedTrackID: UUID?
+    var selectedRegions: Set<UUID> = []
+    @ObservationIgnored var clipboard: RegionClipboard?
+    @ObservationIgnored private var gestureBase: Song?
+    var showMixer = false
+    var pixelsPerSecond: Double = 40
+    var scrollX: Double = 0
+    var timelineWidth: Double = 800
+    var followPlayhead = true
+    var returnOnStop = Prefs.returnOnStop { didSet { Prefs.returnOnStop = returnOnStop } }
+    var latencyOffsetMs = Prefs.latencyOffsetMs { didSet { Prefs.latencyOffsetMs = latencyOffsetMs } }
+    var message: String?
+    var exportProgress: Double?
+
+    // Devices
+    private(set) var inputChannelCount = 0
+    private(set) var sampleRate: Double = 48000
+    private(set) var midiSources: [String] = []
+    var inputUID: String? = Prefs.inputUID
+    var outputUID: String? = Prefs.outputUID
+
+    let waveforms = WaveformStore()
+    /// Bumped when plugins finish loading or fail, so plugin UI refreshes.
+    private(set) var pluginRevision = 0
+    var bufferFrames = Prefs.bufferFrames
+    @ObservationIgnored private var lastPluginCapture = Date.distantPast
+    @ObservationIgnored private var pluginStates: [UUID: Data] = [:]
+
+    @ObservationIgnored let audio = AudioEngine()
+    @ObservationIgnored let recorder = Recorder()
+    @ObservationIgnored let midi = MIDIInput()
+    @ObservationIgnored private(set) var transport: Transport!
+    @ObservationIgnored private var undoStack: [Song] = []
+    @ObservationIgnored private var redoStack: [Song] = []
+    @ObservationIgnored private var saveWork: DispatchWorkItem?
+    @ObservationIgnored private var uiTimer: Timer?
+    @ObservationIgnored private var tapTimes: [Date] = []
+    @ObservationIgnored private var configObserver: NSObjectProtocol?
+
+    // Recording state
+    @ObservationIgnored private var recStartSong: Double = 0
+    @ObservationIgnored private var recStartPlayer: Double = 0
+    @ObservationIgnored private var recMIDITracks: [UUID] = []
+    @ObservationIgnored private let midiLock = NSLock()
+    @ObservationIgnored private var midiEvents: [(UInt8, UInt8, UInt8, UInt64)] = []
+    @ObservationIgnored private var midiRecording = false
+    @ObservationIgnored private var armedMIDI: [UUID] = []
+
+    init(projectURL: URL, song: Song) {
+        self.projectURL = projectURL
+        self.audioFolder = ProjectStore.audioFolder(projectURL)
+        self.song = song
+        transport = Transport(audio: audio, audioFolder: audioFolder, song: song)
+        audio.onPluginsChanged = { [weak self] in
+            guard let self else { return }
+            self.audio.sync(self.song)
+            self.pluginRevision += 1
+        }
+        armedMIDI = song.tracks.filter { $0.kind == .midi && $0.armed }.map(\.id)
+        rebuildEngine()
+        startMIDI()
+        loadWaveforms()
+
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
+            guard let self, (note.object as? AVAudioEngine) === self.audio.engine, self.exportProgress == nil else { return }
+            self.message = "Audio device changed — reconnected."
+            self.rebuildEngine()
+        }
+        uiTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.tickUI() }
+    }
+
+    func close() {
+        stop()
+        uiTimer?.invalidate()
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        saveNow()
+        PluginWindows.closeAll()
+        audio.engine.stop()
+    }
+
+    // MARK: - Engine
+
+    func rebuildEngine() {
+        let wasPlaying = isPlaying
+        if wasPlaying { stop() }
+        let inDev = AudioDevices.device(uid: inputUID)?.id, outDev = AudioDevices.device(uid: outputUID)?.id
+        for dev in [inDev ?? AudioDevices.defaultDevice(input: true), outDev ?? AudioDevices.defaultDevice(input: false)] {
+            if let dev { AudioDevices.setBufferSize(dev, frames: bufferFrames) }
+        }
+        audio.build(song: song, inputDevice: inDev, outputDevice: outDev)
+        sampleRate = audio.sampleRate
+        inputChannelCount = audio.inputChannelCount
+        transport.engineRebuilt(audioFolder: audioFolder)
+        transport.update(song: song)
+        recorder.installTap(on: audio)
+        do { try audio.start() } catch { message = "Couldn't start audio: \(error.localizedDescription)" }
+        if audio.hasInput, audio.inputSampleRate != audio.sampleRate {
+            message = "Input runs at \(Int(audio.inputSampleRate)) Hz but output at \(Int(audio.sampleRate)) Hz. Set both to the same rate in Audio MIDI Setup."
+        } else if song.sampleRate > 0, song.sampleRate != audio.sampleRate {
+            message = "This song was recorded at \(Int(song.sampleRate)) Hz; your device is at \(Int(audio.sampleRate)) Hz. Switch the device to \(Int(song.sampleRate)) Hz to hear the audio."
+        }
+    }
+
+    func setDevices(input: String?, output: String?) {
+        inputUID = input
+        outputUID = output
+        Prefs.inputUID = input
+        Prefs.outputUID = output
+        rebuildEngine()
+    }
+
+    private func startMIDI() {
+        midi.sourcesChanged = { [weak self] in
+            DispatchQueue.main.async { self?.midiSources = self?.midi.sourceNames ?? [] }
+        }
+        midi.onEvent = { [weak self] status, d1, d2, ts in
+            guard let self else { return }
+            let kind = status & 0xF0
+            guard kind == 0x80 || kind == 0x90 || kind == 0xB0 || kind == 0xE0 else { return }
+            self.midiLock.lock()
+            let targets = self.armedMIDI
+            if self.midiRecording { self.midiEvents.append((status, d1, d2, ts)) }
+            self.midiLock.unlock()
+            for t in targets { self.audio.sendMIDI(track: t, status: status, data1: d1, data2: d2) }
+        }
+        midi.start()
+    }
+
+    private func loadWaveforms() {
+        for t in song.tracks { for take in t.takes { if let f = take.fileName { waveforms.load(f, folder: audioFolder) } } }
+    }
+
+    // MARK: - Song changes, undo, save
+
+    private func songDidChange(from old: Song) {
+        audio.sync(song)
+        transport.update(song: song)
+        midiLock.lock()
+        armedMIDI = song.tracks.filter { $0.kind == .midi && $0.armed }.map(\.id)
+        midiLock.unlock()
+        scheduleSave()
+    }
+
+    /// Make an undoable change. Restarts playback so arrangement edits are heard at once.
+    func edit(_ change: (inout Song) -> Void) {
+        let before = song
+        var s = song
+        change(&s)
+        guard s != before else { return }
+        undoStack.append(before)
+        if undoStack.count > 200 { undoStack.removeFirst() }
+        redoStack.removeAll()
+        song = s
+        if arrangementDiffers(before, s) { restartIfPlaying() }
+    }
+
+    var canUndo: Bool { !undoStack.isEmpty && !isRecording }
+    var canRedo: Bool { !redoStack.isEmpty && !isRecording }
+
+    func undo() {
+        guard canUndo, let prev = undoStack.popLast() else { return }
+        redoStack.append(song)
+        song = prev
+        restartIfPlaying()
+    }
+
+    func redo() {
+        guard canRedo, let next = redoStack.popLast() else { return }
+        undoStack.append(song)
+        song = next
+        restartIfPlaying()
+    }
+
+    private func arrangementDiffers(_ a: Song, _ b: Song) -> Bool {
+        a.tracks.map(\.comp) != b.tracks.map(\.comp) || a.tracks.map(\.takes) != b.tracks.map(\.takes)
+            || a.loop != b.loop || a.loopEnabled != b.loopEnabled || a.tempo != b.tempo
+            || a.tracks.map(\.hasAutomation) != b.tracks.map(\.hasAutomation)
+    }
+
+    private func scheduleSave() {
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.saveNow(capturePlugins: Date().timeIntervalSince(self.lastPluginCapture) > 20)
+        }
+        saveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+    }
+
+    /// Save the song. Plugin state is read from the live plugins (slow for big ones, so autosave does it sparingly).
+    func saveNow(capturePlugins: Bool = true) {
+        saveWork?.cancel()
+        if capturePlugins {
+            for t in song.tracks {
+                for slot in t.inserts + (t.instrument.map { [$0] } ?? []) {
+                    if let data = audio.pluginState(slot.id) { pluginStates[slot.id] = data }
+                }
+            }
+            lastPluginCapture = Date()
+        }
+        var copy = song
+        for i in copy.tracks.indices {
+            for j in copy.tracks[i].inserts.indices {
+                if let d = pluginStates[copy.tracks[i].inserts[j].id] { copy.tracks[i].inserts[j].state = d }
+            }
+            if let id = copy.tracks[i].instrument?.id, let d = pluginStates[id] { copy.tracks[i].instrument?.state = d }
+        }
+        do { try ProjectStore.save(copy, to: projectURL) } catch { message = "Save failed: \(error.localizedDescription)" }
+    }
+
+    // MARK: - Plugins
+
+    func addInsert(_ info: PluginInfo, to track: UUID) {
+        updateTrack(track) { $0.inserts.append(info.makeSlot()) }
+    }
+
+    func removeInsert(_ slot: UUID, from track: UUID) {
+        updateTrack(track) { $0.inserts.removeAll { $0.id == slot } }
+    }
+
+    func moveInsert(_ slot: UUID, in track: UUID, by delta: Int) {
+        updateTrack(track) { t in
+            guard let i = t.inserts.firstIndex(where: { $0.id == slot }) else { return }
+            let j = max(0, min(t.inserts.count - 1, i + delta))
+            t.inserts.insert(t.inserts.remove(at: i), at: j)
+        }
+    }
+
+    func toggleBypass(_ slot: UUID, in track: UUID) {
+        updateTrack(track, undoable: false) { t in
+            if let i = t.inserts.firstIndex(where: { $0.id == slot }) { t.inserts[i].bypass.toggle() }
+        }
+    }
+
+    /// nil switches back to the built-in General MIDI sounds.
+    func setInstrument(_ info: PluginInfo?, on track: UUID) {
+        updateTrack(track) { $0.instrument = info?.makeSlot() }
+    }
+
+    func openEditor(_ slot: PluginSlot, track: Track) {
+        guard let unit = audio.unit(slot.id) else {
+            message = audio.pluginErrors[slot.id] ?? "\(slot.name) is still loading."
+            return
+        }
+        PluginWindows.open(unit, slot: slot.id, title: "\(slot.name) — \(track.name)")
+    }
+
+    func pluginStatus(_ slot: PluginSlot) -> String? {
+        _ = pluginRevision
+        if let e = audio.pluginErrors[slot.id] { return e }
+        if audio.unit(slot.id) == nil { return "Loading…" }
+        return nil
+    }
+
+    func setBufferFrames(_ frames: Int) {
+        bufferFrames = frames
+        Prefs.bufferFrames = frames
+        rebuildEngine()
+    }
+
+    // MARK: - UI clock
+
+    private func tickUI() {
+        audio.meters.decay()
+        guard isPlaying, let pos = transport.currentPosition() else { return }
+        playhead.position = pos
+        if followPlayhead {
+            let visible = timelineWidth / pixelsPerSecond
+            if pos > scrollX + visible * 0.92 || pos < scrollX {
+                scrollX = max(0, pos - visible * 0.1)
+            }
+        }
+    }
+
+    // MARK: - Transport
+
+    var loopRange: TimeRange? { song.loopEnabled && song.loop.isValid ? song.loop : nil }
+
+    func togglePlay() {
+        if isPlaying { stop() } else { play(from: playhead.position) }
+    }
+
+    func play(from position: Double) {
+        guard exportProgress == nil else { return }
+        try? audio.start()
+        playStart = position
+        audio.applyAutomation(song, at: position)
+        transport.start(PlayRequest(song: song, position: position, loop: loopRange))
+        isPlaying = true
+    }
+
+    func stop() {
+        guard isPlaying else { return }
+        let stoppedAt = transport.currentPosition() ?? playhead.position
+        isPlaying = false
+        if isRecording { finishRecording() }
+        transport.stop()
+        playhead.position = returnOnStop ? playStart : max(0, stoppedAt)
+    }
+
+    /// Restart from the current position so edits take effect immediately.
+    private func restartIfPlaying() {
+        guard isPlaying, !isRecording, let pos = transport.currentPosition() else { return }
+        let keepStart = playStart
+        play(from: max(0, pos))
+        playStart = keepStart
+    }
+
+    func locate(_ t: Double) {
+        let t = max(0, t)
+        if isRecording { return }
+        if isPlaying {
+            play(from: t)
+        } else {
+            playhead.position = t
+            playStart = t
+            audio.applyAutomation(song, at: t)
+        }
+    }
+
+    func goToStart() { locate(0) }
+
+    // MARK: - Recording
+
+    func toggleRecord() {
+        if isRecording { stop(); return }
+        startRecording()
+    }
+
+    func startRecording() {
+        guard exportProgress == nil else { return }
+        if !song.tracks.contains(where: \.armed) {
+            edit { s in
+                if let id = selectedTrackID, let i = s.trackIndex(id) {
+                    s.tracks[i].armed = true
+                } else if !s.tracks.isEmpty {
+                    s.tracks[0].armed = true
+                } else {
+                    s.tracks.append(Track(name: "Track 1", armed: true))
+                }
+            }
+        }
+        let audioTracks = song.tracks.filter { $0.armed && $0.kind == .audio }
+        if !audioTracks.isEmpty && !audio.hasInput {
+            message = "No audio input found. Pick an input device in Settings."
+            return
+        }
+        if !audioTracks.isEmpty && audio.inputSampleRate != audio.sampleRate {
+            message = "Input and output sample rates differ. Set them to the same rate in Audio MIDI Setup."
+            return
+        }
+        if song.sampleRate == 0 { song.sampleRate = audio.sampleRate }
+
+        let stamp = Int(Date().timeIntervalSince1970)
+        var targets: [Recorder.Target] = []
+        for t in audioTracks {
+            let name = "\(ProjectStore.sanitize(t.name))-\(stamp)-\(t.id.uuidString.prefix(4)).caf"
+            do {
+                let file = try Recorder.makeFile(url: audioFolder.appendingPathComponent(name),
+                                                 sampleRate: audio.sampleRate, channels: t.channels)
+                targets.append(.init(trackID: t.id, fileName: name, channels: t.channels,
+                                     inputChannel: min(t.inputChannel, max(0, inputChannelCount - 1)), file: file))
+            } catch {
+                message = "Couldn't create a file to record into: \(error.localizedDescription)"
+                return
+            }
+        }
+
+        recMIDITracks = song.tracks.filter { $0.armed && $0.kind == .midi }.map(\.id)
+        midiLock.lock(); midiEvents = []; midiRecording = !recMIDITracks.isEmpty; midiLock.unlock()
+
+        if isPlaying, let timing = transport.timing, let pos = transport.currentPosition() {
+            // Punch in on the fly.
+            recStartSong = song.punchEnabled ? max(pos, song.punch.start) : pos
+            let now = HostTime.seconds(HostTime.now) - HostTime.seconds(timing.anchorHost)
+            recStartPlayer = max(0, now - audio.engine.outputNode.presentationLatency)
+            recorder.begin(targets: targets, sampleRate: audio.sampleRate)
+            isRecording = true
+        } else {
+            var start = playhead.position
+            if song.punchEnabled, start >= song.punch.start { start = max(0, song.punch.start - song.secondsPerBar) }
+            let countIn = Double(song.countInBars) * song.secondsPerBar
+            recStartSong = song.punchEnabled ? song.punch.start : start
+            recorder.begin(targets: targets, sampleRate: audio.sampleRate)
+            try? audio.start()
+            playStart = start
+            transport.start(PlayRequest(song: song, position: start, countIn: countIn, recording: true, loop: loopRange))
+            let map = transport.timing!.map
+            recStartPlayer = Double(map.firstPlayerFrame(reaching: Int64(recStartSong * audio.sampleRate))) / audio.sampleRate
+            isPlaying = true
+            isRecording = true
+        }
+    }
+
+    /// Player-time pieces (with song positions) covered by this recording pass.
+    private func keptPieces(map: TimelineMap, endPlayer: Double) -> [(player: Double, song: TimeRange)] {
+        let sr = audio.sampleRate
+        let p0 = Int64(recStartPlayer * sr), p1 = Int64(endPlayer * sr)
+        guard p1 > p0 else { return [] }
+        return map.pieces(playerStart: p0, count: p1 - p0).compactMap { p in
+            var r = TimeRange(start: Double(p.songStart) / sr, end: Double(p.songStart + p.length) / sr)
+            let playerStart = Double(p.playerStart) / sr
+            var shift = 0.0
+            if song.punchEnabled {
+                guard let c = r.clamped(to: song.punch) else { return nil }
+                shift = c.start - r.start
+                r = c
+            }
+            if r.start < 0 {
+                shift += -r.start
+                r.start = 0
+            }
+            guard r.length >= 0.25 else { return nil }
+            return (playerStart + shift, r)
+        }
+    }
+
+    private func finishRecording() {
+        isRecording = false
+        guard let timing = transport.timing else { _ = recorder.finish(); return }
+        let map = timing.map
+        let anchor = HostTime.seconds(timing.anchorHost)
+        let outLat = audio.engine.outputNode.presentationLatency
+        let inLat = audio.hasInput ? audio.engine.inputNode.presentationLatency : 0
+        let offset = latencyOffsetMs / 1000
+        let nowPlayer = HostTime.seconds(HostTime.now) - anchor - outLat
+
+        midiLock.lock(); let events = midiEvents; midiEvents = []; midiRecording = false; midiLock.unlock()
+        let result = recorder.finish()
+
+        var newSong = song
+        var recordedTrackIDs: [UUID] = []
+
+        if let result {
+            let fileStart = HostTime.seconds(result.firstHost) - anchor - inLat - outLat - offset
+            let fileEnd = fileStart + Double(result.frames) / result.sampleRate
+            let pieces = keptPieces(map: map, endPlayer: min(fileEnd, nowPlayer + 0.05))
+            for target in result.targets {
+                guard let ti = newSong.trackIndex(target.trackID) else { continue }
+                recordedTrackIDs.append(target.trackID)
+                var newTakes: [Take] = []
+                for p in pieces where p.player >= fileStart {
+                    var take = Take(name: "Take \(newSong.tracks[ti].takes.count + newTakes.count + 1)",
+                                    fileName: target.fileName, fileOffset: p.player - fileStart,
+                                    start: p.song.start, duration: p.song.length)
+                    take.duration = min(take.duration, fileEnd - p.player)
+                    if take.duration > 0.25 { newTakes.append(take) }
+                }
+                for take in newTakes {
+                    newSong.tracks[ti].takes.append(take)
+                    newSong.tracks[ti].assign(takeID: take.id, over: take.range)
+                }
+                if newSong.tracks[ti].takes.count > 1 && newTakes.count > 1 { newSong.tracks[ti].showTakes = true }
+                waveforms.load(target.fileName, folder: audioFolder, force: true)
+                transport.fileChanged(target.fileName)
+            }
+        }
+
+        if !recMIDITracks.isEmpty {
+            let notes = Session.pairNotes(events, toPlayer: { HostTime.seconds($0) - anchor - outLat - offset }, endPlayer: nowPlayer)
+            let pieces = keptPieces(map: map, endPlayer: nowPlayer)
+            for id in recMIDITracks {
+                guard let ti = newSong.trackIndex(id) else { continue }
+                recordedTrackIDs.append(id)
+                var added: [Take] = []
+                for p in pieces {
+                    let inPiece = notes.filter { $0.on >= p.player && $0.on < p.player + p.song.length }
+                    guard !inPiece.isEmpty else { continue }
+                    let take = Take(name: "Take \(newSong.tracks[ti].takes.count + added.count + 1)",
+                                    start: p.song.start, duration: p.song.length,
+                                    notes: inPiece.map { n in
+                                        MIDINote(pitch: n.pitch, velocity: n.velocity, start: n.on - p.player,
+                                                 duration: max(0.02, min(n.off, p.player + p.song.length) - n.on))
+                                    })
+                    added.append(take)
+                }
+                for take in added {
+                    newSong.tracks[ti].takes.append(take)
+                    newSong.tracks[ti].assign(takeID: take.id, over: take.range)
+                }
+                if added.count > 1 { newSong.tracks[ti].showTakes = true }
+            }
+        }
+
+        applyAutoArm(&newSong, recorded: recordedTrackIDs)
+        edit { $0 = newSong }
+    }
+
+    private struct RawNote { var pitch: UInt8; var velocity: UInt8; var on: Double; var off: Double }
+
+    private static func pairNotes(_ events: [(UInt8, UInt8, UInt8, UInt64)], toPlayer: (UInt64) -> Double,
+                                  endPlayer: Double) -> [RawNote] {
+        var open: [UInt8: (Double, UInt8)] = [:]
+        var notes: [RawNote] = []
+        for (status, d1, d2, ts) in events {
+            let t = toPlayer(ts)
+            let kind = status & 0xF0
+            if kind == 0x90 && d2 > 0 {
+                if let o = open[d1] { notes.append(RawNote(pitch: d1, velocity: o.1, on: o.0, off: t)) }
+                open[d1] = (t, d2)
+            } else if kind == 0x80 || (kind == 0x90 && d2 == 0) {
+                if let o = open.removeValue(forKey: d1) { notes.append(RawNote(pitch: d1, velocity: o.1, on: o.0, off: t)) }
+            }
+        }
+        for (pitch, o) in open { notes.append(RawNote(pitch: pitch, velocity: o.1, on: o.0, off: endPlayer)) }
+        return notes.sorted { $0.on < $1.on }
+    }
+
+    private func applyAutoArm(_ s: inout Song, recorded: [UUID]) {
+        guard s.autoArm != .off, let lastID = recorded.last, let li = s.trackIndex(lastID) else { return }
+        let template = s.tracks[li]
+        for i in s.tracks.indices { s.tracks[i].armed = false }
+        if s.autoArm == .nextTrack, li + 1 < s.tracks.count, s.tracks[li + 1].kind == template.kind {
+            s.tracks[li + 1].armed = true
+            selectedTrackID = s.tracks[li + 1].id
+            return
+        }
+        var t = Track(name: "Track \(s.tracks.count + 1)", kind: template.kind,
+                      colorIndex: (template.colorIndex + 1) % TrackPalette.count, channels: template.channels,
+                      inputChannel: template.inputChannel, armed: true, program: template.program)
+        t.strip = ChannelStrip()
+        s.tracks.insert(t, at: li + 1)
+        selectedTrackID = t.id
+    }
+
+    /// Live recording overlay for a track: song position of the first shown peak and the peaks.
+    func livePeaks(for trackID: UUID) -> (songStart: Double, step: Double, peaks: ArraySlice<Float>)? {
+        guard isRecording, let live = recorder.live(trackID), let timing = transport.timing else { return nil }
+        let anchor = HostTime.seconds(timing.anchorHost)
+        let outLat = audio.engine.outputNode.presentationLatency
+        let inLat = audio.engine.inputNode.presentationLatency
+        let fileStart = HostTime.seconds(live.firstHost) - anchor - inLat - outLat - latencyOffsetMs / 1000
+        let step = Double(Recorder.peakFrames) / audio.sampleRate
+        let nowPlayer = fileStart + Double(live.peaks.count) * step
+        let sr = audio.sampleRate
+        let p0 = Int64(recStartPlayer * sr), p1 = Int64(nowPlayer * sr)
+        guard p1 > p0, let piece = timing.map.pieces(playerStart: p0, count: p1 - p0).last else { return nil }
+        let pieceStart = Double(piece.playerStart) / sr
+        let first = max(0, Int(((pieceStart - fileStart) / step).rounded(.up)))
+        guard first < live.peaks.count else { return nil }
+        let songStart = timing.map.songTime(atPlayerTime: fileStart + Double(first) * step)
+        return (songStart, step, live.peaks[first...])
+    }
+
+    // MARK: - Tracks
+
+    func addTrack(kind: TrackKind) {
+        edit { s in
+            let n = s.tracks.count + 1
+            var t = Track(name: kind == .midi ? "Keys \(n)" : "Track \(n)", kind: kind, colorIndex: s.tracks.count % TrackPalette.count)
+            if kind == .midi { t.channels = 2 }
+            if let sel = selectedTrackID, let i = s.trackIndex(sel) {
+                s.tracks.insert(t, at: i + 1)
+            } else {
+                s.tracks.append(t)
+            }
+            selectedTrackID = t.id
+        }
+    }
+
+    func deleteTrack(_ id: UUID) {
+        edit { $0.tracks.removeAll { $0.id == id } }
+        if selectedTrackID == id { selectedTrackID = nil }
+    }
+
+    func updateTrack(_ id: UUID, undoable: Bool = true, _ change: (inout Track) -> Void) {
+        if undoable {
+            edit { s in if let i = s.trackIndex(id) { change(&s.tracks[i]) } }
+        } else if let i = song.trackIndex(id) {
+            change(&song.tracks[i])
+        }
+    }
+
+    func toggleArm(_ id: UUID) {
+        guard !isRecording else { return }
+        updateTrack(id, undoable: false) { $0.armed.toggle() }
+    }
+
+    func moveTrack(_ id: UUID, by delta: Int) {
+        edit { s in
+            guard let i = s.trackIndex(id) else { return }
+            let j = max(0, min(s.tracks.count - 1, i + delta))
+            let t = s.tracks.remove(at: i)
+            s.tracks.insert(t, at: j)
+        }
+    }
+
+    // MARK: - Takes and comping
+
+    func comp(track: UUID, take: UUID, range: TimeRange) {
+        updateTrack(track) { $0.assign(takeID: take, over: range) }
+    }
+
+    func useWholeTake(track: UUID, take: UUID) {
+        guard let t = song.tracks.first(where: { $0.id == track })?.take(take) else { return }
+        comp(track: track, take: take, range: t.range)
+    }
+
+    func deleteTake(track: UUID, take: UUID) {
+        updateTrack(track) { $0.removeTake(take) }
+    }
+
+    /// Delete selected regions if any, otherwise silence the selected range on the selected track.
+    func deleteSelection() {
+        if !selectedRegions.isEmpty {
+            let ids = selectedRegions
+            edit { s in for i in s.tracks.indices { s.tracks[i].removeSegments(ids) } }
+            selectedRegions = []
+            return
+        }
+        guard let sel = selection, let id = selectedTrackID else { return }
+        updateTrack(id) { $0.clearComp(sel) }
+    }
+
+    // MARK: - Region editing
+
+    /// Start a drag: later previews are applied to this snapshot, and the end is one undo step.
+    func beginGesture() { gestureBase = song }
+
+    func previewGesture(_ change: (inout Song) -> Void) {
+        guard var s = gestureBase else { return }
+        change(&s)
+        song = s
+    }
+
+    func endGesture() {
+        guard let base = gestureBase else { return }
+        gestureBase = nil
+        guard song != base else { return }
+        undoStack.append(base)
+        redoStack.removeAll()
+        if arrangementDiffers(base, song) { restartIfPlaying() }
+    }
+
+    /// Snap to bars unless Option is held (region edits).
+    func snapBar(_ t: Double) -> Double {
+        NSEvent.modifierFlags.contains(.option) ? max(0, t) : max(0, song.snapToBar(t))
+    }
+
+    /// Regions the edit commands act on: the selection, or whatever sits under the playhead on the selected track.
+    private var targetRegions: [(track: UUID, seg: CompSegment)] {
+        var result: [(UUID, CompSegment)] = []
+        for t in song.tracks {
+            for seg in t.comp where selectedRegions.contains(seg.id) { result.append((t.id, seg)) }
+        }
+        if result.isEmpty, let id = selectedTrackID, let t = song.tracks.first(where: { $0.id == id }),
+           let seg = t.segment(at: playhead.position) {
+            result.append((id, seg))
+        }
+        return result
+    }
+
+    func splitAtPlayhead() {
+        let t = playhead.position
+        var targets = targetRegions
+        if selectedRegions.isEmpty && targets.isEmpty {
+            // Nothing selected: cut every track at the playhead.
+            targets = song.tracks.compactMap { tr in tr.segment(at: t).map { (tr.id, $0) } }
+        }
+        guard !targets.isEmpty else { return }
+        edit { s in
+            for (tid, seg) in targets {
+                if let i = s.trackIndex(tid) { s.tracks[i].splitSegment(seg.id, at: t) }
+            }
+        }
+    }
+
+    func copyRegions() {
+        let targets = targetRegions
+        guard let first = targets.map(\.seg.start).min() else { return }
+        let last = targets.map(\.seg.end).max() ?? first
+        var items: [RegionClipboard.Item] = []
+        for (tid, seg) in targets {
+            guard let take = song.tracks.first(where: { $0.id == tid })?.take(seg.takeID) else { continue }
+            var s = seg
+            s.start -= first
+            s.end -= first
+            s.offset -= first
+            items.append(.init(take: take, segment: s))
+        }
+        clipboard = RegionClipboard(items: items, length: last - first)
+    }
+
+    /// Paste onto the selected track at `at` (default: the playhead).
+    func pasteRegions(at: Double? = nil) {
+        guard let clip = clipboard, !clip.items.isEmpty,
+              let tid = selectedTrackID ?? song.tracks.first?.id else { return }
+        let at = at ?? playhead.position
+        edit { s in
+            guard let i = s.trackIndex(tid) else { return }
+            var newIDs: Set<UUID> = []
+            for item in clip.items {
+                let isAudio = item.take.fileName != nil
+                guard isAudio == (s.tracks[i].kind == .audio) else { continue }
+                if s.tracks[i].take(item.take.id) == nil { s.tracks[i].takes.append(item.take) }
+                var seg = item.segment
+                seg.id = UUID()
+                seg.start += at
+                seg.end += at
+                seg.offset += at
+                s.tracks[i].place(seg)
+                newIDs.insert(seg.id)
+            }
+            selectedRegions = newIDs
+        }
+    }
+
+    /// Copy the selected regions and paste them straight after themselves.
+    func duplicateRegions() {
+        let targets = targetRegions
+        guard let tid = targets.first?.track, let start = targets.map(\.seg.start).min() else { return }
+        copyRegions()
+        guard let length = clipboard?.length else { return }
+        selectedTrackID = tid
+        pasteRegions(at: start + length)
+    }
+
+    func importAudio(_ urls: [URL]) {
+        let sr = audio.sampleRate
+        if song.sampleRate == 0 { song.sampleRate = sr }
+        let at = playhead.position
+        DispatchQueue.global(qos: .userInitiated).async { [audioFolder] in
+            var imported: [(String, Double, Int, String)] = []
+            var failures: [String] = []
+            for url in urls {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                if let r = try? ProjectStore.importAudio(url, into: audioFolder, sampleRate: sr) {
+                    imported.append((r.fileName, r.duration, r.channels, url.deletingPathExtension().lastPathComponent))
+                } else {
+                    failures.append(url.lastPathComponent)
+                }
+            }
+            DispatchQueue.main.async {
+                if !failures.isEmpty { self.message = "Couldn't import: \(failures.joined(separator: ", "))" }
+                guard !imported.isEmpty else { return }
+                self.edit { s in
+                    for (file, dur, ch, name) in imported {
+                        var t = Track(name: name, colorIndex: s.tracks.count % TrackPalette.count, channels: ch)
+                        let take = Take(name: name, fileName: file, start: at, duration: dur)
+                        t.takes = [take]
+                        t.comp = [CompSegment(takeID: take.id, start: take.start, end: take.start + dur)]
+                        s.tracks.append(t)
+                    }
+                }
+                for (file, _, _, _) in imported { self.waveforms.load(file, folder: self.audioFolder) }
+            }
+        }
+    }
+
+    // MARK: - Markers, loop, punch
+
+    static let sectionNames = ["Intro", "Verse", "Pre-Chorus", "Chorus", "Verse 2", "Chorus 2", "Bridge", "Solo", "Chorus 3", "Outro"]
+
+    var sortedMarkers: [Marker] { song.markers.sorted { $0.position < $1.position } }
+
+    func addMarker() {
+        let pos = song.snapToBar(isPlaying ? (transport.currentPosition() ?? playhead.position) : playhead.position)
+        guard !song.markers.contains(where: { abs($0.position - pos) < 0.01 }) else { return }
+        edit { s in
+            let name = Session.sectionNames[min(s.markers.count, Session.sectionNames.count - 1)]
+            s.markers.append(Marker(name: name, position: pos))
+        }
+    }
+
+    /// The span from a marker to the next one (or the end of the song).
+    func sectionRange(_ marker: Marker) -> TimeRange {
+        let next = sortedMarkers.first { $0.position > marker.position + 0.001 }?.position
+        let end = next ?? max(song.contentEnd, marker.position + song.secondsPerBar * 4)
+        return TimeRange(start: marker.position, end: song.snapToBar(end) > marker.position ? song.snapToBar(end) : end)
+    }
+
+    func loopSection(_ marker: Marker) {
+        edit { s in
+            s.loop = sectionRange(marker)
+            s.loopEnabled = true
+        }
+        locate(marker.position)
+    }
+
+    func jumpToMarker(index: Int) {
+        let m = sortedMarkers
+        guard index < m.count else { return }
+        locate(m[index].position)
+    }
+
+    /// Move one bar, snapping to the bar grid.
+    func nudgeBar(forward: Bool) {
+        let bar = song.secondsPerBar
+        let pos = playhead.position
+        let idx = forward ? floor(pos / bar + 1e-6) + 1 : ceil(pos / bar - 1e-6) - 1
+        locate(max(0, idx * bar))
+    }
+
+    /// Jump to the next/previous section marker (or the song's start/end).
+    func jumpMarker(forward: Bool) {
+        let pos = playhead.position
+        let stops = Set(sortedMarkers.map(\.position) + [0, song.contentEnd]).sorted()
+        if forward {
+            if let next = stops.first(where: { $0 > pos + 0.01 }) { locate(next) }
+        } else {
+            locate(stops.last { $0 < pos - 0.05 } ?? 0)
+        }
+    }
+
+    func loopSelection() {
+        guard let sel = selection, sel.isValid else { return }
+        edit { $0.loop = sel; $0.loopEnabled = true }
+    }
+
+    func punchSelection() {
+        guard let sel = selection, sel.isValid else { return }
+        edit { $0.punch = sel; $0.punchEnabled = true }
+    }
+
+    func toggleLoop() {
+        edit { s in
+            if !s.loop.isValid || (s.loop.start == 0 && s.loop.end == 8 && s.contentEnd > 8 && !s.loopEnabled) {
+                s.loop = TimeRange(start: s.snapToBar(playhead.position), end: s.snapToBar(playhead.position) + s.secondsPerBar * 4)
+            }
+            s.loopEnabled.toggle()
+        }
+    }
+
+    func tapTempo() {
+        let now = Date()
+        tapTimes = tapTimes.filter { now.timeIntervalSince($0) < 3 } + [now]
+        guard tapTimes.count >= 3 else { return }
+        let intervals = zip(tapTimes.dropFirst(), tapTimes).map { $0.timeIntervalSince($1) }
+        let bpm = 60 / (intervals.reduce(0, +) / Double(intervals.count))
+        edit { $0.tempo = (bpm * 10).rounded() / 10 }
+    }
+
+    // MARK: - Export
+
+    func export(format: ExportFormat, range: TimeRange, stems: Bool, completion: @escaping (URL?) -> Void) {
+        stop()
+        let base = song
+        let folder = ProjectStore.bouncesFolder(projectURL)
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
+            .replacingOccurrences(of: ":", with: ".")
+        var jobs: [(Song, URL)] = []
+        let mixName = ProjectStore.sanitize("\(base.name) mix \(stamp)")
+        jobs.append((base, folder.appendingPathComponent(mixName).appendingPathExtension(format.ext)))
+        if stems {
+            let stemFolder = folder.appendingPathComponent(ProjectStore.sanitize("\(base.name) stems \(stamp)"))
+            try? FileManager.default.createDirectory(at: stemFolder, withIntermediateDirectories: true)
+            for (i, t) in base.tracks.enumerated() where !t.comp.isEmpty && !t.mute {
+                var s = base
+                for j in s.tracks.indices { s.tracks[j].solo = j == i }
+                let name = ProjectStore.sanitize(String(format: "%02d %@", i + 1, t.name))
+                jobs.append((s, stemFolder.appendingPathComponent(name).appendingPathExtension(format.ext)))
+            }
+        }
+
+        exportProgress = 0
+        if audio.hasInput { audio.engine.inputNode.removeTap(onBus: 0) }
+        audio.detachInputSink()
+        let audio = self.audio, transport = self.transport!
+        transport.queue.async {
+            var failure: Error?
+            for (i, job) in jobs.enumerated() {
+                do {
+                    try Exporter.render(audio: audio, transport: transport, song: job.0, range: range,
+                                        to: job.1, format: format) { p in
+                        DispatchQueue.main.async { self.exportProgress = (Double(i) + p) / Double(jobs.count) }
+                    }
+                } catch {
+                    failure = error
+                    break
+                }
+            }
+            DispatchQueue.main.async {
+                self.exportProgress = nil
+                self.audio.sync(self.song)
+                self.rebuildEngine()
+                if let failure {
+                    self.message = "Export failed: \(failure.localizedDescription)"
+                    completion(nil)
+                } else {
+                    completion(jobs.first?.1)
+                }
+            }
+        }
+    }
+
+    /// Default mixdown range: the whole song plus a reverb tail.
+    var songRange: TimeRange {
+        TimeRange(start: 0, end: max(song.contentEnd + 3, 1))
+    }
+}

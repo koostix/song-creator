@@ -1,0 +1,31 @@
+name: SongCreator
+options:
+  bundleIdPrefix: com.paulshuler
+  deploymentTarget:
+    macOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+targets:
+  SongCreator:
+    type: application
+    platform: macOS
+    sources: [SongCreator]
+    info:
+      path: SongCreator/App/Info.plist
+      properties:
+        CFBundleDisplayName: Song Creator
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.music
+        NSMicrophoneUsageDescription: Song Creator records your instruments and vocals from your audio interface or microphone.
+        NSHighResolutionCapable: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.paulshuler.SongCreator
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: NO
+        GENERATE_INFOPLIST_FILE: NO
+        COMBINE_HIDPI_IMAGES: YES
