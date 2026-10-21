@@ -133,13 +133,23 @@ final class AudioEngine {
     let meters = MeterStore()
     private var lastReverbRoom: ReverbRoom?
 
+    /// Channels of the chosen input device (in an aggregate, the output device's own inputs are skipped).
     var inputChannelCount: Int {
-        hasInput ? Int(engine.inputNode.inputFormat(forBus: 0).channelCount) : 0
+        hasInput ? max(0, Int(engine.inputNode.inputFormat(forBus: 0).channelCount) - inputChannelOffset) : 0
+    }
+    /// Where the chosen input's channel 1 sits in the engine's input (non-zero only for some aggregates).
+    private(set) var inputChannelOffset = 0
+    private var aggregateID: AudioObjectID?
+
+    func destroyAggregate() {
+        if let agg = aggregateID { AudioHardwareDestroyAggregateDevice(agg) }
+        aggregateID = nil
     }
     var inputSampleRate: Double { hasInput ? engine.inputNode.inputFormat(forBus: 0).sampleRate : 0 }
 
     /// Build a fresh engine graph, optionally on specific devices.
-    func build(song: Song, inputDevice: AudioDeviceID?, outputDevice: AudioDeviceID?, inputEnabled: Bool = true) {
+    func build(song: Song, inputDevice: AudioDeviceID?, outputDevice: AudioDeviceID?, inputEnabled: Bool = true,
+               bufferFrames: Int? = nil) {
         engine.stop()
         // Nothing is carried into the new engine: the old one may still be alive (a configuration-change
         // notification holds it), and its nodes and audio units belong to it. Plugins are reloaded into the
@@ -163,7 +173,8 @@ final class AudioEngine {
         inputRing = nil
         inputSink = nil
 
-        if let outputDevice { AudioDevices.setDevice(outputDevice, on: engine.outputNode) }
+        destroyAggregate()
+        inputChannelOffset = 0
         outputDeviceID = outputDevice ?? AudioDevices.defaultDevice(input: false)
         let inID = inputDevice ?? AudioDevices.defaultDevice(input: true)
         hasInput = inID.map { AudioDevices.inputChannels($0) > 0 } ?? false
@@ -198,7 +209,25 @@ final class AudioEngine {
                     + "Playback, KEYS and MIDI still work. To record audio, pick another input in Settings (⌘,)."
             }
         }
-        if let inputDevice, hasInput { AudioDevices.setDevice(inputDevice, on: engine.inputNode) }
+        // Point the engine at the chosen devices. AVAudioEngine drives input and output through one
+        // hardware unit, so two separate devices (e.g. MacBook mic + speakers) must be joined into an
+        // aggregate first; setting them one by one leaves the engine unable to start.
+        if inputDevice != nil || outputDevice != nil, let outID = outputDeviceID {
+            if hasInput, let inID, inID != outID {
+                if let agg = AudioDevices.makeAggregate(output: outID, input: inID) {
+                    aggregateID = agg
+                    inputChannelOffset = AudioDevices.inputChannels(outID)   // the output device's inputs come first
+                    AudioDevices.setDevice(agg, on: engine.outputNode)
+                    if let bufferFrames { AudioDevices.setBufferSize(agg, frames: bufferFrames) }
+                } else {
+                    hasInput = false
+                    inputProblem = "Couldn't combine \(AudioDevices.name(inID) ?? "the input") with \(AudioDevices.name(outID) ?? "the output"). Try System default in Settings."
+                    AudioDevices.setDevice(outID, on: engine.outputNode)
+                }
+            } else {
+                AudioDevices.setDevice(outID, on: engine.outputNode)
+            }
+        }
         if hasInput {
             let f = engine.inputNode.inputFormat(forBus: 0)
             if f.channelCount == 0 || f.sampleRate == 0 {
@@ -343,7 +372,7 @@ final class AudioEngine {
         ], fromBus: 0, format: stereo)
 
         if track.kind == .audio, let ring = inputRing {
-            let reader = MonitorReader(ring: ring, firstChannel: track.inputChannel)
+            let reader = MonitorReader(ring: ring, firstChannel: track.inputChannel + inputChannelOffset)
             let node = AVAudioSourceNode(format: n.format) { isSilence, _, frames, abl in
                 reader.render(isSilence, Int(frames), abl)
             }

@@ -519,6 +519,50 @@ enum SelfTest {
         let renamedProject = lib.renameProject("EP 2", to: "Live Session")
         try check(renamedProject == "Live Session" && lib.projects.contains("Live Session"), "rename a project")
 
+        print("Explicit device choices")
+        if let mic = AudioDevices.all().first(where: { $0.uid == "BuiltInMicrophoneDevice" }),
+           let spk = AudioDevices.all().first(where: { $0.uid == "BuiltInSpeakerDevice" }) {
+            // The setup that broke recording: separate input and output devices chosen in Settings.
+            if let agg = AudioDevices.makeAggregate(output: spk.id, input: mic.id) {
+                let e = AVAudioEngine()
+                AudioDevices.setDevice(agg, on: e.outputNode)
+                let inFmt = e.inputNode.inputFormat(forBus: 0)
+                e.connect(e.mainMixerNode, to: e.outputNode, format: nil)
+                let player = AVAudioPlayerNode()
+                e.attach(player)
+                let fmt = AVAudioFormat(standardFormatWithSampleRate: inFmt.sampleRate > 0 ? inFmt.sampleRate : 44100, channels: 2)!
+                e.connect(player, to: e.mainMixerNode, format: fmt)
+                var started = true
+                do { e.prepare(); try e.start() } catch { started = false }
+                let silence = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 8192)!
+                silence.frameLength = 8192
+                player.scheduleBuffer(silence)
+                player.play()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+                let rendered = e.outputNode.lastRenderTime?.sampleTime ?? 0
+                let outCh = e.outputNode.outputFormat(forBus: 0).channelCount
+                print("  aggregate: started=\(started) in=\(inFmt.sampleRate)/\(inFmt.channelCount) out=\(outCh) rendered=\(rendered)")
+                e.stop()
+                AudioHardwareDestroyAggregateDevice(agg)
+                try check(started && inFmt.channelCount == 1 && outCh == 2 && rendered > 0,
+                          "mic + speakers joined: engine starts, 1 in / 2 out, audio renders")
+            } else {
+                try check(false, "could create an aggregate of mic + speakers")
+            }
+            let out = AudioEngine()
+            out.build(song: Song.newIdea(), inputDevice: mic.id, outputDevice: spk.id, inputEnabled: false)
+            var outStarted = true
+            do { try out.start() } catch { outStarted = false }
+            try check(outStarted && out.sampleRate > 0, "speakers chosen with input off: engine starts")
+            out.engine.stop()
+            out.build(song: Song.newIdea(), inputDevice: mic.id, outputDevice: spk.id, inputEnabled: true)
+            var bothStarted = true
+            do { try out.start() } catch { bothStarted = false }
+            try check(bothStarted, "mic + speakers chosen in Settings: engine starts (\(out.inputProblem ?? "input open"))")
+            out.engine.stop()
+            out.destroyAggregate()
+        }
+
         print("Input switch and feedback protection")
         let savedInput = Prefs.inputEnabled, savedProtection = Prefs.feedbackProtection
         defer { Prefs.inputEnabled = savedInput; Prefs.feedbackProtection = savedProtection }

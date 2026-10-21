@@ -35,7 +35,8 @@ struct TrackHeader: View {
                                        ch = track.inputChannel, stereo = track.channels == 2] in
                         // Armed audio tracks show their input; otherwise the track output.
                         if armed && kind == .audio {
-                            return stereo ? max(audio.meters.input(ch), audio.meters.input(ch + 1)) : audio.meters.input(ch)
+                            let c = ch + audio.inputChannelOffset
+                            return stereo ? max(audio.meters.input(c), audio.meters.input(c + 1)) : audio.meters.input(c)
                         }
                         return audio.meters.level(id)
                     }, vertical: false)

@@ -51,6 +51,7 @@ struct SongCreatorApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
 
     init() {
+        Diagnostics.runIfRequested()
         #if DEBUG
         SelfTest.runIfRequested()
         SelfTest.snapshotIfRequested()

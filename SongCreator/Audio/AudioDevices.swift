@@ -136,6 +136,27 @@ enum AudioDevices {
 
     static func name(_ id: AudioDeviceID) -> String? { all().first { $0.id == id }?.name }
 
+    static func uid(_ id: AudioDeviceID) -> String? { string(id, kAudioDevicePropertyDeviceUID) }
+
+    /// A private aggregate of an output and an input device, clocked by the output, with drift
+    /// correction on the input. Only this process sees it; it disappears when the app quits.
+    static func makeAggregate(output: AudioDeviceID, input: AudioDeviceID) -> AudioObjectID? {
+        guard let outUID = uid(output), let inUID = uid(input) else { return nil }
+        let desc: [String: Any] = [
+            kAudioAggregateDeviceUIDKey: "com.paulshuler.SongCreator.aggregate.\(UUID().uuidString)",
+            kAudioAggregateDeviceNameKey: "Song Creator (\(name(input) ?? "input") + \(name(output) ?? "output"))",
+            kAudioAggregateDeviceIsPrivateKey: 1,
+            kAudioAggregateDeviceMainSubDeviceKey: outUID,
+            kAudioAggregateDeviceSubDeviceListKey: [
+                [kAudioSubDeviceUIDKey: outUID],
+                [kAudioSubDeviceUIDKey: inUID, kAudioSubDeviceDriftCompensationKey: 1],
+            ],
+        ]
+        var id = AudioObjectID(0)
+        guard AudioHardwareCreateAggregateDevice(desc as CFDictionary, &id) == noErr, id != 0 else { return nil }
+        return id
+    }
+
     static func inputChannels(_ id: AudioDeviceID) -> Int {
         channels(id, kAudioDevicePropertyScopeInput)
     }

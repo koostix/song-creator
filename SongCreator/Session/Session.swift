@@ -217,6 +217,7 @@ final class Session {
         saveNow()
         PluginWindows.closeAll()
         audio.engine.stop()
+        audio.destroyAggregate()
     }
 
     // MARK: - Engine
@@ -232,13 +233,18 @@ final class Session {
         for dev in [inDev ?? AudioDevices.defaultDevice(input: true), outDev ?? AudioDevices.defaultDevice(input: false)] {
             if let dev { AudioDevices.setBufferSize(dev, frames: bufferFrames) }
         }
-        audio.build(song: song, inputDevice: inDev, outputDevice: outDev, inputEnabled: inputEnabled)
+        audio.build(song: song, inputDevice: inDev, outputDevice: outDev, inputEnabled: inputEnabled, bufferFrames: bufferFrames)
         sampleRate = audio.sampleRate
         inputChannelCount = audio.inputChannelCount
         transport.engineRebuilt(audioFolder: audioFolder)
         transport.update(song: song)
         recorder.installTap(on: audio)
-        do { try audio.start() } catch { message = "Couldn't start audio: \(error.localizedDescription)" }
+        do {
+            try audio.start()
+        } catch {
+            message = "Audio couldn't start with these devices. Pick System default in Settings (⌘,) and try again."
+            deviceMessage = message
+        }
         micDenied = audio.micDenied
         var warning: String?
         if inputEnabled, let problem = audio.inputProblem, song.tracks.contains(where: { $0.kind == .audio }) {
@@ -526,7 +532,7 @@ final class Session {
 
     func play(from position: Double) {
         guard exportProgress == nil else { return }
-        try? audio.start()
+        guard ensureRunning() else { return }
         playStart = position
         audio.applyAutomation(song, at: position)
         transport.start(PlayRequest(song: song, position: position, loop: loopRange))
@@ -571,8 +577,20 @@ final class Session {
         startRecording()
     }
 
+    /// Start the engine if needed; if it can't run, say so instead of failing silently.
+    private func ensureRunning() -> Bool {
+        do {
+            try audio.start()
+            return true
+        } catch {
+            message = "Audio isn't running with the current devices. Pick System default in Settings (⌘,) and try again."
+            return false
+        }
+    }
+
     func startRecording() {
-        guard exportProgress == nil else { return }
+        guard exportProgress == nil else { message = "Wait for the mixdown to finish."; return }
+        guard ensureRunning() else { return }
         if !song.tracks.contains(where: \.armed) {
             edit { s in
                 if let id = selectedTrackID, let i = s.trackIndex(id) {
@@ -603,7 +621,8 @@ final class Session {
                 let file = try Recorder.makeFile(url: audioFolder.appendingPathComponent(name),
                                                  sampleRate: audio.sampleRate, channels: t.channels)
                 targets.append(.init(trackID: t.id, fileName: name, channels: t.channels,
-                                     inputChannel: min(t.inputChannel, max(0, inputChannelCount - 1)), file: file))
+                                     inputChannel: min(t.inputChannel, max(0, inputChannelCount - 1)) + audio.inputChannelOffset,
+                                     file: file))
             } catch {
                 message = "Couldn't create a file to record into: \(error.localizedDescription)"
                 return

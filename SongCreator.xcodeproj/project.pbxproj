@@ -11,6 +11,7 @@
 		2F6D8E42B96FC9CC713E1401 /* MIDIInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11741F30BB1A007171669101 /* MIDIInput.swift */; };
 		3ACB434FD79629909F2AE299 /* ProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 725A76E61FA4DE8DAAB79568 /* ProjectStore.swift */; };
 		43DEB1E906D90DF615401B4D /* AudioDevices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3361F3B87B2A80A2CDF84C09 /* AudioDevices.swift */; };
+		44684A26F031EBF8A936C6C0 /* Diagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD71A22610AE8F3B38C8AF1A /* Diagnostics.swift */; };
 		4839EA04E0619F9CD5212EBB /* SelfTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96A78CF3153B581EA315F83F /* SelfTest.swift */; };
 		4BBD3C94D11023AC84C784CD /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60C2E33D87353CCD3F9EBD58 /* Timeline.swift */; };
 		4FEB476D1ED884A1F46EFE86 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C42F92D298C36A0D16045A4D /* Recorder.swift */; };
@@ -68,6 +69,7 @@
 		E15623CF3689653D5BAC3658 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		E39083BB8FD7A7F43B55FDF6 /* Song.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Song.swift; sourceTree = "<group>"; };
 		F44067E85A691D31B74EFACA /* TunerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunerView.swift; sourceTree = "<group>"; };
+		FD71A22610AE8F3B38C8AF1A /* Diagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -145,6 +147,7 @@
 		C26B63188D483D9958996950 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				FD71A22610AE8F3B38C8AF1A /* Diagnostics.swift */,
 				01D7D0F15FB4AE2B3F49E49E /* Info.plist */,
 				96A78CF3153B581EA315F83F /* SelfTest.swift */,
 				AE775CD3838681742317CE31 /* SongCreatorApp.swift */,
@@ -240,6 +243,7 @@
 				EFD3F7F2506FA77284F4A668 /* ChunkRenderer.swift in Sources */,
 				D3090913348028F36516DBCF /* Comp.swift in Sources */,
 				B7DE66E8DDD76A00E7B6C33F /* Controls.swift in Sources */,
+				44684A26F031EBF8A936C6C0 /* Diagnostics.swift in Sources */,
 				62C8D6A2C711F3362FC9A130 /* Exporter.swift in Sources */,
 				8FBB7AFF0BEC887721F9A310 /* InputMonitor.swift in Sources */,
 				2F6D8E42B96FC9CC713E1401 /* MIDIInput.swift in Sources */,

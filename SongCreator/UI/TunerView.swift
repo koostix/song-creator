@@ -103,7 +103,7 @@ struct TunerView: View {
         .padding(16)
         .frame(width: 240)
         .onAppear {
-            session.recorder.setTunerChannel(channel)
+            session.recorder.setTunerChannel(channel + session.audio.inputChannelOffset)
             timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
                 let f = PitchDetector.detect(session.recorder.latestTunerSamples(), sampleRate: session.recorder.inputRate)
                 hz = f
