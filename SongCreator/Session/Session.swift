@@ -85,8 +85,9 @@ final class Session {
     @ObservationIgnored let recorder = Recorder()
     @ObservationIgnored let midi = MIDIInput()
     @ObservationIgnored private(set) var transport: Transport!
-    @ObservationIgnored private var undoStack: [Song] = []
-    @ObservationIgnored private var redoStack: [Song] = []
+    // Observed so the Undo/Redo menu items and buttons enable themselves.
+    private var undoStack: [Song] = []
+    private var redoStack: [Song] = []
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     @ObservationIgnored private var uiTimer: Timer?
     @ObservationIgnored private var tapTimes: [Date] = []
@@ -686,6 +687,11 @@ final class Session {
         undoStack.append(base)
         redoStack.removeAll()
         if arrangementDiffers(base, song) { restartIfPlaying() }
+    }
+
+    /// For knobs and faders: a whole drag becomes one undo step.
+    func continuousEdit(_ began: Bool) {
+        if began { beginGesture() } else { endGesture() }
     }
 
     /// Snap to bars unless Option is held (region edits).

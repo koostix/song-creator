@@ -16,6 +16,7 @@ struct MixerView: View {
             .padding(6)
         }
         .background(Theme.background)
+        .environment(\.continuousEdit, session.continuousEdit)
     }
 }
 

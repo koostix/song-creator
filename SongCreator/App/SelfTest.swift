@@ -236,6 +236,30 @@ enum SelfTest {
         try check(lp440 > 0.005 && lp880 < lp440 * 0.6, "insert plugin processes the audio")
         try check(mix.window(6.1, 6.8).rms > 0.002, "MIDI plays through the AU instrument")
         try check(audio.pluginState(lowpass.id) != nil, "plugin state can be saved")
+
+        print("Undo")
+        let projectDir = dir.appendingPathComponent("UndoSong")
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let session = Session(projectURL: projectDir, song: Song.newIdea())
+        defer { session.close() }
+        try check(!session.canUndo, "nothing to undo in a new song")
+        session.beginGesture()
+        for end in stride(from: 9.0, through: 16.0, by: 1) {   // a loop-edge drag: many previews
+            session.previewGesture { $0.loop = TimeRange(start: 4, end: end); $0.loopEnabled = true }
+        }
+        session.endGesture()
+        try check(session.canUndo && session.song.loop.end == 16, "a whole drag is one undo step")
+        session.undo()
+        try check(session.song.loop == TimeRange(start: 0, end: 8) && !session.song.loopEnabled && !session.canUndo,
+                  "undo restores the loop from before the drag")
+        session.redo()
+        try check(session.song.loop.end == 16 && session.song.loopEnabled, "redo brings it back")
+        session.continuousEdit(true)
+        session.updateTrack(session.song.tracks[0].id, undoable: false) { $0.strip.volumeDB = -6 }
+        session.updateTrack(session.song.tracks[0].id, undoable: false) { $0.strip.volumeDB = -9 }
+        session.continuousEdit(false)
+        session.undo()
+        try check(session.song.tracks[0].strip.volumeDB == 0, "a fader move undoes in one step")
     }
 }
 

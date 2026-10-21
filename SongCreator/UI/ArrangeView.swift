@@ -131,7 +131,11 @@ struct TrackListCorner: View {
 
 struct RulerView: View {
     @Bindable var session: Session
-    @State private var preDrag: (loop: TimeRange, enabled: Bool)?
+
+    enum LoopDrag { case newLoop, moveLoop, loopStart, loopEnd }
+    @State private var loopDrag: LoopDrag?
+    @State private var loopAtStart = TimeRange(start: 0, end: 0)
+    @State private var moved = false
     @State private var renaming: Marker?
     @State private var renameText = ""
 
@@ -155,27 +159,22 @@ struct RulerView: View {
             }
             .frame(height: Layout.rulerHeight)
             .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { g in
-                    if abs(g.translation.width) < 3 { return }
-                    let a = session.snap(scale.t(g.startLocation.x)), b = session.snap(scale.t(g.location.x))
-                    if preDrag == nil { preDrag = (session.song.loop, session.song.loopEnabled) }
-                    session.song.loop = TimeRange(start: min(a, b), end: max(a, b))
-                    session.song.loopEnabled = true
-                }
-                .onEnded { g in
-                    if let pre = preDrag {
-                        // Restore, then commit as one undoable step.
-                        let loop = session.song.loop
-                        session.song.loop = pre.loop
-                        session.song.loopEnabled = pre.enabled
-                        session.edit { $0.loop = loop; $0.loopEnabled = true }
-                    } else {
-                        session.locate(session.snap(scale.t(g.location.x)))
+            .onContinuousHover { phase in
+                guard loopDrag == nil else { return }
+                if case .active(let p) = phase {
+                    switch hit(p, scale) {
+                    case .loopStart, .loopEnd: NSCursor.resizeLeftRight.set()
+                    case .moveLoop: NSCursor.openHand.set()
+                    default: NSCursor.arrow.set()
                     }
-                    preDrag = nil
-                })
-            .help("Click to move the playhead. Drag to set the loop.")
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { g in loopChanged(g, scale) }
+                .onEnded { g in loopEnded(g, scale) })
+            .help("Click to move the playhead, drag to draw a loop. On the loop bar: drag its edges to resize it, drag the middle to move it, click to turn looping on or off.")
 
             ZStack(alignment: .topLeading) {
                 Color.black.opacity(0.15)
@@ -189,6 +188,63 @@ struct RulerView: View {
             .onTapGesture(count: 2) { session.addMarker() }
         }
         .clipped()
+    }
+
+    /// The yellow loop bar sits in the top 9 px; give its edges and body a slightly larger target.
+    private func hit(_ p: CGPoint, _ scale: TimeScale) -> LoopDrag {
+        let loop = session.song.loop
+        guard loop.isValid, p.y <= 13 else { return .newLoop }
+        let xs = scale.x(loop.start), xe = scale.x(loop.end)
+        if abs(p.x - xs) < 6 { return .loopStart }
+        if abs(p.x - xe) < 6 { return .loopEnd }
+        if p.x > xs, p.x < xe { return .moveLoop }
+        return .newLoop
+    }
+
+    private func loopChanged(_ g: DragGesture.Value, _ scale: TimeScale) {
+        if loopDrag == nil {
+            loopDrag = hit(g.startLocation, scale)
+            loopAtStart = session.song.loop
+            moved = false
+            session.beginGesture()
+            if loopDrag == .moveLoop { NSCursor.closedHand.set() }
+        }
+        guard moved || abs(g.translation.width) > 3 else { return }
+        moved = true
+        let dt = Double(g.translation.width) / scale.pps
+        let orig = loopAtStart
+        let minLen = session.song.secondsPerBeat
+        var r: TimeRange
+        switch loopDrag! {
+        case .newLoop:
+            let a = session.snap(scale.t(g.startLocation.x)), b = session.snap(scale.t(g.location.x))
+            r = TimeRange(start: min(a, b), end: max(a, b))
+        case .moveLoop:
+            let start = max(0, session.snap(orig.start + dt))
+            r = TimeRange(start: start, end: start + orig.length)
+        case .loopStart:
+            r = TimeRange(start: min(session.snap(orig.start + dt), orig.end - minLen), end: orig.end)
+        case .loopEnd:
+            r = TimeRange(start: orig.start, end: max(session.snap(orig.end + dt), orig.start + minLen))
+        }
+        session.previewGesture { s in
+            s.loop = r
+            s.loopEnabled = true
+        }
+    }
+
+    private func loopEnded(_ g: DragGesture.Value, _ scale: TimeScale) {
+        if !moved {
+            if loopDrag == .newLoop {
+                session.locate(session.snap(scale.t(g.location.x)))
+            } else {
+                session.previewGesture { $0.loopEnabled.toggle() }
+            }
+        }
+        session.endGesture()
+        loopDrag = nil
+        moved = false
+        NSCursor.arrow.set()
     }
 
     private func markerFlag(_ m: Marker, _ scale: TimeScale) -> some View {

@@ -54,6 +54,7 @@ struct Knob: View {
     var format: (Double) -> String = { String(format: "%.1f", $0) }
     var color: Color = Theme.accent
     var logarithmic = false
+    @Environment(\.continuousEdit) private var onEditing
 
     @State private var dragStart: Double?
 
@@ -82,12 +83,12 @@ struct Knob: View {
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { g in
-                    if dragStart == nil { dragStart = norm }
+                    if dragStart == nil { dragStart = norm; onEditing(true) }
                     let fine = NSEvent.modifierFlags.contains(.option) ? 0.2 : 1
                     value = denorm(dragStart! - g.translation.height / 150 * fine)
                 }
-                .onEnded { _ in dragStart = nil })
-            .onTapGesture(count: 2) { value = defaultValue }
+                .onEnded { _ in dragStart = nil; onEditing(false) })
+            .onTapGesture(count: 2) { onEditing(true); value = defaultValue; onEditing(false) }
             Text(dragStart != nil ? format(value) : label)
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(dragStart != nil ? Theme.text : Theme.dim)
@@ -134,6 +135,7 @@ struct MeterBar: View {
 struct Fader: View {
     @Binding var db: Double
     var height: CGFloat = 150
+    @Environment(\.continuousEdit) private var onEditing
 
     @State private var dragStart: Double?
 
@@ -166,13 +168,13 @@ struct Fader: View {
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { g in
-                    if dragStart == nil { dragStart = Fader.pos(db) }
+                    if dragStart == nil { dragStart = Fader.pos(db); onEditing(true) }
                     let fine = NSEvent.modifierFlags.contains(.option) ? 0.2 : 1
                     let p = dragStart! - g.translation.height / h * fine
                     db = (Fader.db(p) * 10).rounded() / 10
                 }
-                .onEnded { _ in dragStart = nil })
-            .onTapGesture(count: 2) { db = 0 }
+                .onEnded { _ in dragStart = nil; onEditing(false) })
+            .onTapGesture(count: 2) { onEditing(true); db = 0; onEditing(false) }
         }
         .frame(width: 30, height: height)
     }
@@ -180,4 +182,16 @@ struct Fader: View {
 
 extension Double {
     var dbString: String { self <= -60 ? "-∞" : String(format: "%+.1f", self) }
+}
+
+private struct ContinuousEditKey: EnvironmentKey {
+    static let defaultValue: (Bool) -> Void = { _ in }
+}
+
+extension EnvironmentValues {
+    /// Called with true when a knob/fader drag starts and false when it ends, so a drag is one undo step.
+    var continuousEdit: (Bool) -> Void {
+        get { self[ContinuousEditKey.self] }
+        set { self[ContinuousEditKey.self] = newValue }
+    }
 }

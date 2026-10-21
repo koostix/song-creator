@@ -125,6 +125,16 @@ struct TransportBar: View {
             TextField("Song name", text: $session.song.name)
                 .textFieldStyle(.plain).font(.headline).frame(width: 170)
 
+            HStack(spacing: 2) {
+                Button { session.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                    .disabled(!session.canUndo).help("Undo (⌘Z)")
+                Button { session.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+                    .disabled(!session.canRedo).help("Redo (⇧⌘Z)")
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Theme.text)
+
             HStack(spacing: 6) {
                 TransportButton(icon: "backward.end.fill", help: "Go to start (Return)") { session.goToStart() }
                 TransportButton(icon: session.isPlaying ? "stop.fill" : "play.fill",
