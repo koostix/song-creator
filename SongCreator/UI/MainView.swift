@@ -133,7 +133,23 @@ struct StatusBar: View {
                     .foregroundStyle(Theme.dim)
             }
             Spacer()
-            Text("\(Int(session.sampleRate / 1000)) kHz · \(session.inputChannelCount) in · \(session.midiSources.count) MIDI")
+            if session.monitoringMuted && session.song.tracks.contains(where: { $0.monitor && $0.kind == .audio }) {
+                Label("Monitoring muted: speakers", systemImage: "speaker.slash.fill")
+                    .foregroundStyle(Color.orange)
+                    .help("Feedback protection: your input isn't played back while sound comes out of the computer's speakers. Plug in headphones to hear yourself, or turn protection off in Settings.")
+            }
+            Button {
+                session.inputEnabled.toggle()
+            } label: {
+                Label(session.inputEnabled ? "Input on" : "Input off",
+                      systemImage: session.inputEnabled ? "mic.fill" : "mic.slash.fill")
+                    .foregroundStyle(session.inputEnabled ? Theme.text : Color.orange)
+            }
+            .buttonStyle(.plain)
+            .help(session.inputEnabled
+                  ? "Audio input is on (\(session.inputChannelCount) channels). Click to switch it off: no mic, no monitoring, no feedback. Playback, KEYS and MIDI keep working."
+                  : "Audio input is off. Click to switch it on to record audio.")
+            Text("\(Int(session.sampleRate / 1000)) kHz · \(session.midiSources.count) MIDI")
                 .foregroundStyle(Theme.dim)
         }
         .font(.caption)

@@ -1,6 +1,10 @@
 import AVFoundation
 import CoreAudio
 
+extension Notification.Name {
+    static let audioDevicesChanged = Notification.Name("SongCreator.audioDevicesChanged")
+}
+
 struct AudioDevice: Identifiable, Hashable {
     let id: AudioDeviceID
     let uid: String
@@ -19,7 +23,8 @@ enum AudioDevices {
         var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr else { return [] }
         return ids.compactMap { id in
-            guard let name = string(id, kAudioObjectPropertyName), let uid = string(id, kAudioDevicePropertyDeviceUID) else { return nil }
+            guard let name = string(id, kAudioObjectPropertyName), let uid = string(id, kAudioDevicePropertyDeviceUID),
+                  !name.hasPrefix("CADefaultDeviceAggregate") else { return nil }   // AVAudioEngine's private aggregate
             return AudioDevice(id: id, uid: uid, name: name,
                                inputChannels: channels(id, kAudioDevicePropertyScopeInput),
                                outputChannels: channels(id, kAudioDevicePropertyScopeOutput))
@@ -47,6 +52,68 @@ enum AudioDevices {
         AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
                              &id, UInt32(MemoryLayout<AudioDeviceID>.size))
     }
+
+    static func transportType(_ id: AudioDeviceID) -> UInt32 {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr ? value : 0
+    }
+
+    /// The output's current data source, e.g. 'ispk' (internal speakers) or 'hdpn' (headphones).
+    static func outputDataSource(_ id: AudioDeviceID) -> UInt32? {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDataSource,
+                                              mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+        var value = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr ? value : nil
+    }
+
+    static let internalSpeakers: UInt32 = 0x6973_706B // 'ispk'
+
+    /// True when sound comes out of the computer's own speakers, where a live mic can feed back.
+    /// Headphones show up either as their own device or as a 'hdpn' data source, so they don't count.
+    static func isBuiltInSpeakers(_ id: AudioDeviceID) -> Bool {
+        guard transportType(id) == kAudioDeviceTransportTypeBuiltIn else { return false }
+        if let source = outputDataSource(id) { return source == internalSpeakers }
+        return (name(id) ?? "").localizedCaseInsensitiveContains("speaker")
+    }
+
+    /// Call `handler` on the main queue whenever `selector` changes on `id`. Returns a token for `removeListener`.
+    static func addListener(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                            scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+                            _ handler: @escaping () -> Void) -> (AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock) {
+        var addr = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { _, _ in handler() }
+        AudioObjectAddPropertyListenerBlock(id, &addr, DispatchQueue.main, block)
+        return (id, addr, block)
+    }
+
+    static func removeListener(_ token: (AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)) {
+        var addr = token.1
+        AudioObjectRemovePropertyListenerBlock(token.0, &addr, DispatchQueue.main, token.2)
+    }
+
+    /// The buffer size the device actually uses (it may round what was asked for).
+    static func bufferSize(_ id: AudioDeviceID) -> Int {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyBufferFrameSize,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr ? Int(value) : 0
+    }
+
+    /// Posts `.audioDevicesChanged` when devices are plugged in or out, or the system defaults change.
+    static func startWatching() {
+        guard !watching else { return }
+        watching = true
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        for sel in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice] {
+            _ = addListener(system, sel) { NotificationCenter.default.post(name: .audioDevicesChanged, object: nil) }
+        }
+    }
+    private static var watching = false
 
     /// I/O buffer size in frames. Smaller means less monitoring latency and more CPU.
     static func setBufferSize(_ id: AudioDeviceID, frames: Int) {

@@ -50,8 +50,11 @@ struct TrackHeader: View {
                         session.updateTrack(track.id, undoable: false) { $0.solo.toggle() }
                     }
                     if track.kind == .audio {
-                        LitButton(label: "I", on: track.monitor, color: Theme.accent,
-                                  help: "Input monitoring: hear this track's input through its effects and plugins") {
+                        LitButton(label: "I", on: track.monitor,
+                                  color: session.monitoringMuted || !session.inputEnabled ? Color.orange : Theme.accent,
+                                  help: !session.inputEnabled ? "Input monitoring (the audio input is switched off)"
+                                    : session.monitoringMuted ? "Input monitoring is muted by feedback protection while sound plays through the speakers. Use headphones to hear yourself."
+                                    : "Input monitoring: hear this track's input through its effects and plugins") {
                             session.updateTrack(track.id, undoable: false) { $0.monitor.toggle() }
                         }
                     }

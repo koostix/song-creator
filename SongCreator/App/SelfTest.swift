@@ -25,8 +25,10 @@ enum SelfTest {
             song.loop = TimeRange(start: 0, end: 8)
             let model = AppModel()
             let session = Session(projectURL: project, song: song)
+            let savedJam = Prefs.jamMode
             session.jamMode = true
             session.musicalTyping = true
+            defer { Prefs.jamMode = savedJam }
             for (w, mixer) in [(1180.0, false), (1600.0, false), (1180.0, true)] {
                 session.showMixer = mixer
                 let view = MainView(session: session).environment(model)
@@ -516,6 +518,37 @@ enum SelfTest {
         try check(ep == "EP" && ep2 == "EP 2", "new projects get unique names")
         let renamedProject = lib.renameProject("EP 2", to: "Live Session")
         try check(renamedProject == "Live Session" && lib.projects.contains("Live Session"), "rename a project")
+
+        print("Input switch and feedback protection")
+        let savedInput = Prefs.inputEnabled, savedProtection = Prefs.feedbackProtection
+        defer { Prefs.inputEnabled = savedInput; Prefs.feedbackProtection = savedProtection }
+        for d in AudioDevices.all() where d.outputChannels > 0 {
+            print("  output \(d.name): speakers=\(AudioDevices.isBuiltInSpeakers(d.id))")
+        }
+        if let speakers = AudioDevices.all().first(where: { $0.name.contains("MacBook") && $0.outputChannels > 0 }) {
+            try check(AudioDevices.isBuiltInSpeakers(speakers.id), "the MacBook's built-in speakers are detected")
+        }
+        try check(AudioDevices.all().filter { $0.name.hasPrefix("BlackHole") }.allSatisfy { !AudioDevices.isBuiltInSpeakers($0.id) },
+                  "virtual devices are not treated as speakers")
+
+        session.inputEnabled = false
+        try check(!session.audio.hasInput && !session.audio.canMonitorInput && session.audio.inputChannelCount == 0,
+                  "input off: the mic is never opened and nothing can monitor")
+        session.inputEnabled = true
+
+        let audioTrack = session.song.tracks.first { $0.kind == .audio }!.id
+        session.updateTrack(audioTrack, undoable: false) { $0.monitor = true }
+        let monitorOn = { session.audio.tracks[audioTrack]?.monitorReader?.enabled.load(ordering: .relaxed) ?? false }
+        session.feedbackProtection = true
+        print("  on speakers: \(session.onSpeakers), input usable: \(session.audio.canMonitorInput)")
+        if session.onSpeakers {
+            try check(session.monitoringMuted && !monitorOn(), "on speakers, protection keeps a monitoring track silent")
+        }
+        session.feedbackProtection = false
+        try check(!session.monitoringMuted && monitorOn() == session.audio.canMonitorInput,
+                  "with protection off, monitoring follows the I button")
+        session.feedbackProtection = true
+        session.updateTrack(audioTrack, undoable: false) { $0.monitor = false }
 
         print("Auto-arm monitoring")
         for mode in [AutoArmMode.newTrack, .nextTrack] {

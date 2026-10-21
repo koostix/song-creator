@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Observation
 import SwiftUI
 
@@ -30,6 +31,14 @@ enum Prefs {
     static var libraryProject: String? {
         get { defaults.string(forKey: "libraryProject") }
         set { defaults.set(newValue, forKey: "libraryProject") }
+    }
+    static var inputEnabled: Bool {
+        get { defaults.object(forKey: "inputEnabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "inputEnabled") }
+    }
+    static var feedbackProtection: Bool {
+        get { defaults.object(forKey: "feedbackProtection") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "feedbackProtection") }
     }
     static var jamMode: Bool {
         get { defaults.bool(forKey: "jamMode") }
@@ -81,6 +90,20 @@ final class Session {
     private(set) var sampleRate: Double = 48000
     private(set) var midiSources: [String] = []
     private(set) var micDenied = false
+    /// Master switch for the audio input. Off means the mic is never opened.
+    var inputEnabled = Prefs.inputEnabled {
+        didSet { Prefs.inputEnabled = inputEnabled; rebuildEngine() }
+    }
+    /// Mute input monitoring while the sound comes out of the computer's speakers.
+    var feedbackProtection = Prefs.feedbackProtection {
+        didSet { Prefs.feedbackProtection = feedbackProtection; updateMonitorSafety() }
+    }
+    /// Output currently goes to the built-in speakers (not headphones or an interface).
+    private(set) var onSpeakers = false
+    /// Monitoring is being held off by feedback protection.
+    var monitoringMuted: Bool { feedbackProtection && onSpeakers }
+    @ObservationIgnored private var speakerListener: (AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)?
+    @ObservationIgnored private var deviceMessage: String?
     var inputUID: String? = Prefs.inputUID
     var outputUID: String? = Prefs.outputUID
 
@@ -190,6 +213,7 @@ final class Session {
         stop()
         uiTimer?.invalidate()
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        if let l = speakerListener { AudioDevices.removeListener(l) }
         saveNow()
         PluginWindows.closeAll()
         audio.engine.stop()
@@ -201,11 +225,14 @@ final class Session {
         lastRebuild = Date()
         let wasPlaying = isPlaying
         if wasPlaying { stop() }
+        // A device warning from the last build may no longer apply.
+        if message != nil, message == deviceMessage { message = nil }
+        deviceMessage = nil
         let inDev = AudioDevices.device(uid: inputUID)?.id, outDev = AudioDevices.device(uid: outputUID)?.id
         for dev in [inDev ?? AudioDevices.defaultDevice(input: true), outDev ?? AudioDevices.defaultDevice(input: false)] {
             if let dev { AudioDevices.setBufferSize(dev, frames: bufferFrames) }
         }
-        audio.build(song: song, inputDevice: inDev, outputDevice: outDev)
+        audio.build(song: song, inputDevice: inDev, outputDevice: outDev, inputEnabled: inputEnabled)
         sampleRate = audio.sampleRate
         inputChannelCount = audio.inputChannelCount
         transport.engineRebuilt(audioFolder: audioFolder)
@@ -213,12 +240,36 @@ final class Session {
         recorder.installTap(on: audio)
         do { try audio.start() } catch { message = "Couldn't start audio: \(error.localizedDescription)" }
         micDenied = audio.micDenied
-        if let problem = audio.inputProblem, song.tracks.contains(where: { $0.kind == .audio }) {
-            message = problem
+        var warning: String?
+        if inputEnabled, let problem = audio.inputProblem, song.tracks.contains(where: { $0.kind == .audio }) {
+            warning = problem   // with the input switched off on purpose, the status bar says so instead
         } else if audio.hasInput, audio.inputSampleRate != audio.sampleRate {
-            message = "Input runs at \(Int(audio.inputSampleRate)) Hz but output at \(Int(audio.sampleRate)) Hz. Set both to the same rate in Audio MIDI Setup."
+            warning = "Input runs at \(Int(audio.inputSampleRate)) Hz but output at \(Int(audio.sampleRate)) Hz. Set both to the same rate in Audio MIDI Setup."
         } else if song.sampleRate > 0, song.sampleRate != audio.sampleRate {
-            message = "This song was recorded at \(Int(song.sampleRate)) Hz; your device is at \(Int(audio.sampleRate)) Hz. Switch the device to \(Int(song.sampleRate)) Hz to hear the audio."
+            warning = "This song was recorded at \(Int(song.sampleRate)) Hz; your device is at \(Int(audio.sampleRate)) Hz. Switch the device to \(Int(song.sampleRate)) Hz to hear the audio."
+        }
+        if let warning {
+            message = warning
+            deviceMessage = warning
+        }
+        watchSpeakers()
+        updateMonitorSafety()
+    }
+
+    /// Re-check whether sound goes to the laptop speakers (and so whether monitoring must be muted).
+    func updateMonitorSafety() {
+        onSpeakers = audio.outputDeviceID.map(AudioDevices.isBuiltInSpeakers) ?? false
+        audio.monitorMuted = monitoringMuted
+        audio.applyParameters(song)
+    }
+
+    /// Plugging headphones into the jack can switch the built-in output's source without a device change.
+    private func watchSpeakers() {
+        if let old = speakerListener { AudioDevices.removeListener(old) }
+        speakerListener = nil
+        guard let out = audio.outputDeviceID else { return }
+        speakerListener = AudioDevices.addListener(out, kAudioDevicePropertyDataSource, scope: kAudioDevicePropertyScopeOutput) { [weak self] in
+            self?.updateMonitorSafety()
         }
     }
 

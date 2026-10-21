@@ -114,6 +114,10 @@ final class AudioEngine {
     private(set) var inputProblem: String?
     /// The user has denied microphone access (the UI offers to open System Settings).
     private(set) var micDenied = false
+    /// The output device in use (selected or system default).
+    private(set) var outputDeviceID: AudioDeviceID?
+    /// Feedback protection: when true, no track monitors its input, whatever its I button says.
+    var monitorMuted = false
 
     // Live input for per-track monitoring.
     private var inputRing: InputRing?
@@ -135,7 +139,7 @@ final class AudioEngine {
     var inputSampleRate: Double { hasInput ? engine.inputNode.inputFormat(forBus: 0).sampleRate : 0 }
 
     /// Build a fresh engine graph, optionally on specific devices.
-    func build(song: Song, inputDevice: AudioDeviceID?, outputDevice: AudioDeviceID?) {
+    func build(song: Song, inputDevice: AudioDeviceID?, outputDevice: AudioDeviceID?, inputEnabled: Bool = true) {
         engine.stop()
         // Nothing is carried into the new engine: the old one may still be alive (a configuration-change
         // notification holds it), and its nodes and audio units belong to it. Plugins are reloaded into the
@@ -160,11 +164,17 @@ final class AudioEngine {
         inputSink = nil
 
         if let outputDevice { AudioDevices.setDevice(outputDevice, on: engine.outputNode) }
+        outputDeviceID = outputDevice ?? AudioDevices.defaultDevice(input: false)
         let inID = inputDevice ?? AudioDevices.defaultDevice(input: true)
         hasInput = inID.map { AudioDevices.inputChannels($0) > 0 } ?? false
         inputProblem = hasInput ? nil : "No audio input device found. Pick one in Settings."
         micDenied = false
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        if !inputEnabled {
+            // Input switched off: never open the mic (no recording input, no monitoring, no feedback).
+            hasInput = false
+            inputProblem = "Audio input is off. Turn it on in the status bar or Settings to record audio."
+        }
+        switch inputEnabled ? AVCaptureDevice.authorizationStatus(for: .audio) : .authorized {
         case .denied, .restricted:
             hasInput = false
             micDenied = true
@@ -502,7 +512,7 @@ final class AudioEngine {
             setLevel(track, n, anySolo: anySolo, at: automationTime)
             n.strip.destination(forMixer: reverbBus, bus: n.reverbBus)?.volume = Float(s.reverbSend)
             n.strip.destination(forMixer: delayBus, bus: n.delayBus)?.volume = Float(s.delaySend)
-            n.monitorReader?.enabled.store(track.monitor && inputSink != nil, ordering: .relaxed)
+            n.monitorReader?.enabled.store(track.monitor && inputSink != nil && !monitorMuted, ordering: .relaxed)
 
             n.eq.bypass = !s.eqOn && !s.hpfOn
             n.eq.bands[0].bypass = !s.hpfOn
