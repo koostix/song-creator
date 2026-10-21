@@ -107,6 +107,22 @@ enum SelfTest {
         t.setFades(right, fadeIn: 50, fadeOut: 1)
         try check(t.segment(right)!.fadeIn + t.segment(right)!.fadeOut <= t.segment(right)!.length + 1e-9, "fades fit inside the region")
 
+        print("Loop tiling (JAM)")
+        var bed = Track(name: "bed")
+        let bt = Take(name: "B", fileName: "z", start: 0, duration: 20)
+        bed.takes = [bt]
+        bed.assign(takeID: bt.id, over: TimeRange(start: 1, end: 3))   // only 2–3 is inside the loop
+        bed.place(CompSegment(takeID: bt.id, start: 7, end: 7.5))     // existing material gets overwritten
+        bed.tileLoop(TimeRange(start: 2, end: 4), until: 10)
+        let starts = bed.comp.map(\.start), offsets = bed.comp.map(\.offset)
+        try check(starts == [1, 4, 6, 8] && offsets == [0, 2, 4, 6] && bed.comp.allSatisfy { $0.length <= 2 },
+                  "loop content repeats every 2 s with shifted material (\(starts))")
+        try check(bed.segment(at: 7.2) == nil, "copies overwrite what was there")
+        let loop4 = TimeRange(start: 0, end: 8)
+        try check(Session.jamEnd(loop: loop4, stoppedAt: 30, beat: 0.5) == 32, "stop mid-pass rounds up to a whole pass")
+        try check(Session.jamEnd(loop: loop4, stoppedAt: 32.3, beat: 0.5) == 32, "stop just into a new pass doesn't add one")
+        try check(Session.jamEnd(loop: loop4, stoppedAt: 3, beat: 0.5) == 8, "always at least one pass")
+
         print("Automation curve")
         let pts = [AutoPoint(time: 1, value: -10), AutoPoint(time: 3, value: 0)]
         try check(Track.evaluate(pts, at: 0) == -10 && Track.evaluate(pts, at: 2) == -5 && Track.evaluate(pts, at: 9) == 0, "linear interpolation")
@@ -189,6 +205,29 @@ enum SelfTest {
         try check(mix.window(5.3, 5.9).rms < 0.01, "silence between audio and MIDI")
         try check(mix.window(6.1, 6.8).rms > 0.005, "MIDI note renders through the built-in sampler")
         try check(abs(mix.onset(after: 0) - 1) * 1000 < 5, "take starts sample-accurately at 1 s")
+
+        // 1b. A split in continuous audio is seamless (crossfade, no dip at the edit).
+        var seamless = Track(name: "Seam")
+        seamless.takes = [t1]
+        seamless.assign(takeID: t1.id, over: t1.range)
+        seamless.splitSegment(seamless.comp[0].id, at: 3)
+        song.tracks = [seamless]
+        mix = try render(song, audio: audio, dir: dir, length: 5, name: "seam.wav")
+        let atEdit = mix.window(2.998, 3.004).rms, around = mix.window(2.9, 2.99).rms
+        print(String(format: "  split edge rms %.4f vs %.4f", atEdit, around))
+        try check(atEdit > around * 0.9, "no dip at a split point")
+
+        // 1c. JAM paste-out: a 2 s loop of take 1 repeated to 9 s plays the whole way.
+        var jammed = Track(name: "Bed")
+        jammed.takes = [t1]
+        jammed.assign(takeID: t1.id, over: TimeRange(start: 1, end: 3))
+        song.tracks = [jammed]
+        song = song.tilingLoop(TimeRange(start: 1, end: 3), until: 9, excluding: [])
+        mix = try render(song, audio: audio, dir: dir, length: 10, name: "jam.wav")
+        let rep = mix.window(7.2, 8.8), boundary = mix.window(4.995, 5.005)
+        print(String(format: "  jam: repeat %.3f@%.0fHz, boundary %.3f, after %.4f", rep.rms, rep.freq, boundary.rms, mix.window(9.2, 9.8).rms))
+        try check(rep.rms > 0.1 && abs(rep.freq - 440) < 15 && boundary.rms > rep.rms * 0.9, "pasted-out loop plays seamlessly to the end")
+        try check(mix.window(9.2, 9.8).rms < 0.001, "and stops where the take ended")
 
         // 2. Region moved by +2 s with a 1 s fade-in, and volume automation.
         var moved = track

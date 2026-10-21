@@ -82,7 +82,7 @@ struct ProjectBrowser: View {
     static let keys: [(String, String)] = [
         ("Space", "Play / stop"), ("R", "Record (again to stop)"), ("Return", "Go to start"),
         ("← →", "Move a bar"), ("⌥← ⌥→", "Previous / next section"), ("1–9", "Jump to section"),
-        ("L / ⇧L", "Loop on/off / loop selection"), ("P / ⇧P", "Punch on/off / punch selection"),
+        ("L / ⇧L", "Loop on/off / loop selection"), ("J", "Jam over the loop"), ("P / ⇧P", "Punch on/off / punch selection"),
         ("C", "Click on/off"), ("⇧M", "Add section marker"), ("A M S", "Arm / mute / solo track"),
         ("T / ⇧T", "New audio / MIDI track"), ("X", "Mixer"), ("⌘E", "Export mixdown"),
     ]

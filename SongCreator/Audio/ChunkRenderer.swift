@@ -38,11 +38,18 @@ final class ChunkRenderer {
         let sr = sampleRate
         let songEnd = songStart + count
         var wrote = false
-        for seg in track.comp {
+        for (j, seg) in track.comp.enumerated() {
             let segStart = Int64((seg.start * sr).rounded())
             let segEnd = Int64((seg.end * sr).rounded())
+            // When the next region starts exactly here (comp edits, looped-out repeats), play a few ms
+            // past the edge and equal-power crossfade into it instead of dipping both sides to silence.
+            var tail: Int64 = 0
+            if j + 1 < track.comp.count, seg.fadeOut == 0, track.comp[j + 1].fadeIn == 0,
+               abs(Int64((track.comp[j + 1].start * sr).rounded()) - segEnd) <= 1 {
+                tail = fadeFrames
+            }
             var a = max(segStart, songStart)
-            let b = min(segEnd, songEnd)
+            let b = min(segEnd + tail, songEnd)
             guard b > a, let take = track.take(seg.takeID), let name = take.fileName,
                   let f = file(name), f.processingFormat.sampleRate == sr else { continue }
 
@@ -73,8 +80,18 @@ final class ChunkRenderer {
                 let songPos = a + Int64(i)
                 var g: Float = 1
                 let fromStart = songPos - segStart, toEnd = segEnd - songPos
-                if fromStart < fadeIn { g = sinf(Float(fromStart) / Float(fadeIn) * .pi / 2) }
-                if toEnd < fadeOut { g = min(g, sinf(Float(toEnd) / Float(fadeOut) * .pi / 2)) }
+                if fromStart < fadeIn {
+                    let x = sinf(Float(fromStart) / Float(fadeIn) * .pi / 2)
+                    // Short edge fades are equal-gain (sin²) so a crossfade into continuous material stays flat;
+                    // longer user fades keep the smoother sine shape.
+                    g = fadeIn == fadeFrames ? x * x : x
+                }
+                if toEnd <= 0 {
+                    let x = cosf(Float(-toEnd) / Float(tail) * .pi / 2)
+                    g = x * x
+                } else if tail == 0, toEnd < fadeOut {
+                    g = min(g, sinf(Float(toEnd) / Float(fadeOut) * .pi / 2))
+                }
                 if srcCh == dstCh {
                     for c in 0..<dstCh { dst[c][base + i] += src[c][i] * g }
                 } else if srcCh == 1 {

@@ -114,6 +114,49 @@ extension Track {
     mutating func removeSegments(_ ids: Set<UUID>) {
         comp.removeAll { ids.contains($0.id) }
     }
+
+    /// Repeat whatever plays inside `loop` back to back after it, up to `end`.
+    /// Each repeat replaces everything in its span, like pasting the loop.
+    mutating func tileLoop(_ loop: TimeRange, until end: Double) {
+        let len = loop.length
+        guard len > 0.05, end > loop.end else { return }
+        let pieces: [CompSegment] = comp.compactMap { seg in
+            guard let r = seg.range.clamped(to: loop) else { return nil }
+            var p = seg
+            if r.start > seg.start { p.fadeIn = 0 }
+            if r.end < seg.end { p.fadeOut = 0 }
+            p.start = r.start
+            p.end = r.end
+            return p
+        }
+        guard !pieces.isEmpty else { return }
+        var k = 1
+        while loop.start + Double(k) * len < end - 0.001 {
+            let shift = Double(k) * len
+            // The whole pass is replaced, silent parts of the loop included.
+            clearComp(TimeRange(start: loop.start + shift, end: min(loop.end + shift, end)))
+            for p in pieces {
+                var s = p
+                s.id = UUID()
+                s.start += shift
+                s.end = min(s.end + shift, end)
+                s.offset += shift
+                if s.end - s.start > 0.001 { place(s) }
+            }
+            k += 1
+        }
+    }
+}
+
+extension Song {
+    /// The song with every track except `excluding` looped out from `loop` to `end`.
+    func tilingLoop(_ loop: TimeRange, until end: Double, excluding: Set<UUID>) -> Song {
+        var s = self
+        for i in s.tracks.indices where !excluding.contains(s.tracks[i].id) {
+            s.tracks[i].tileLoop(loop, until: end)
+        }
+        return s
+    }
 }
 
 /// Regions on the clipboard, with the takes they need, relative to the earliest start.

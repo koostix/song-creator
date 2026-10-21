@@ -70,6 +70,7 @@ struct MainView: View {
             switch ch {
             case "r": s.toggleRecord()
             case "b": s.splitAtPlayhead()
+            case "j": s.jamMode.toggle()
             case "l": shift ? s.loopSelection() : s.toggleLoop()
             case "p": shift ? s.punchSelection() : s.edit { $0.punchEnabled.toggle() }
             case "c": s.song.clickEnabled.toggle()
@@ -100,6 +101,7 @@ struct StatusBar: View {
                 Button("Dismiss") { session.message = nil }.buttonStyle(.link)
             } else {
                 Text(session.isRecording ? "Recording… press R or Space to stop"
+                     : session.jamReady ? "JAM is on: press R to record one long take over the repeating loop. It's pasted out to match when you stop."
                      : "Space play · R record · ⇧M marker · L loop · T new track · X mixer · drag across a take lane to comp")
                     .foregroundStyle(Theme.dim)
             }
@@ -148,6 +150,10 @@ struct TransportBar: View {
             HStack(spacing: 4) {
                 LitButton(label: "LOOP", on: session.song.loopEnabled, color: Theme.loop, width: 40,
                           help: "Cycle (L). Drag in the ruler to set the range.") { session.toggleLoop() }
+                LitButton(label: "JAM", on: session.jamMode, color: .green, width: 36,
+                          help: "Jam over the loop (J). With LOOP on, recording plays straight through while the loop repeats on the other tracks. Your take is one long recording, and when you stop, the loop is pasted out to match.") {
+                    session.jamMode.toggle()
+                }
                 LitButton(label: "PUNCH", on: session.song.punchEnabled, color: Theme.punch, width: 46,
                           help: "Auto punch (P). Select a range and press ⇧P to set it.") { session.edit { $0.punchEnabled.toggle() } }
                 LitButton(label: "CLICK", on: session.song.clickEnabled, color: Theme.accent, width: 42,

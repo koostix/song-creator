@@ -26,6 +26,10 @@ enum Prefs {
         get { defaults.object(forKey: "bufferFrames") as? Int ?? 256 }
         set { defaults.set(newValue, forKey: "bufferFrames") }
     }
+    static var jamMode: Bool {
+        get { defaults.bool(forKey: "jamMode") }
+        set { defaults.set(newValue, forKey: "jamMode") }
+    }
     static var tunerA4: Double {
         get { defaults.object(forKey: "tunerA4") as? Double ?? 440 }
         set { defaults.set(newValue, forKey: "tunerA4") }
@@ -101,6 +105,32 @@ final class Session {
     @ObservationIgnored private var midiEvents: [(UInt8, UInt8, UInt8, UInt64)] = []
     @ObservationIgnored private var midiRecording = false
     @ObservationIgnored private var armedMIDI: [UUID] = []
+
+    /// JAM: recording over a loop plays it out straight (one long take) and pastes the loop out on stop.
+    var jamMode = Prefs.jamMode { didSet { Prefs.jamMode = jamMode } }
+    /// The loop being jammed over during a JAM recording pass.
+    @ObservationIgnored private var jamLoop: TimeRange?
+    @ObservationIgnored private var jamExcluded: Set<UUID> = []
+    /// Ten minutes of repeats is plenty for any pass; the real tile-out happens on stop.
+    private static let jamHorizon: Double = 600
+
+    /// What the transport plays: the song, or during a JAM pass the song with the loop repeated ahead.
+    private var playbackSong: Song {
+        guard let loop = jamLoop else { return song }
+        return song.tilingLoop(loop, until: loop.start + Session.jamHorizon, excluding: jamExcluded)
+    }
+
+    /// Where a JAM pass's paste-out ends: the stop position rounded up to a whole loop pass,
+    /// or down when it's less than a beat into a new pass. Always at least one pass.
+    static func jamEnd(loop: TimeRange, stoppedAt t: Double, beat: Double) -> Double {
+        let passes = (t - loop.start) / loop.length
+        let into = (passes - floor(passes)) * loop.length
+        let whole = into < beat ? floor(passes) : ceil(passes)
+        return loop.start + max(1, whole) * loop.length
+    }
+
+    /// True when pressing record now would start a JAM pass.
+    var jamReady: Bool { jamMode && song.loopEnabled && song.loop.isValid }
 
     init(projectURL: URL, song: Song) {
         self.projectURL = projectURL
@@ -191,7 +221,7 @@ final class Session {
 
     private func songDidChange(from old: Song) {
         audio.sync(song)
-        transport.update(song: song)
+        transport.update(song: playbackSong)
         midiLock.lock()
         armedMIDI = song.tracks.filter { $0.kind == .midi && $0.armed }.map(\.id)
         midiLock.unlock()
@@ -436,12 +466,21 @@ final class Session {
         } else {
             var start = playhead.position
             if song.punchEnabled, start >= song.punch.start { start = max(0, song.punch.start - song.secondsPerBar) }
+            if jamReady {
+                // JAM: play straight on from the loop start; the loop repeats on the other tracks.
+                start = song.loop.start
+                jamLoop = song.loop
+                jamExcluded = Set(song.tracks.filter(\.armed).map(\.id))
+            } else {
+                jamLoop = nil
+            }
             let countIn = Double(song.countInBars) * song.secondsPerBar
-            recStartSong = song.punchEnabled ? song.punch.start : start
+            recStartSong = song.punchEnabled ? max(song.punch.start, start) : start
             recorder.begin(targets: targets, sampleRate: audio.sampleRate)
             try? audio.start()
             playStart = start
-            transport.start(PlayRequest(song: song, position: start, countIn: countIn, recording: true, loop: loopRange))
+            transport.start(PlayRequest(song: playbackSong, position: start, countIn: countIn, recording: true,
+                                        loop: jamLoop == nil ? loopRange : nil))
             let map = transport.timing!.map
             recStartPlayer = Double(map.firstPlayerFrame(reaching: Int64(recStartSong * audio.sampleRate))) / audio.sampleRate
             isPlaying = true
@@ -474,7 +513,7 @@ final class Session {
 
     private func finishRecording() {
         isRecording = false
-        guard let timing = transport.timing else { _ = recorder.finish(); return }
+        guard let timing = transport.timing else { _ = recorder.finish(); jamLoop = nil; return }
         let map = timing.map
         let anchor = HostTime.seconds(timing.anchorHost)
         let outLat = audio.engine.outputNode.presentationLatency
@@ -537,6 +576,17 @@ final class Session {
                 }
                 if added.count > 1 { newSong.tracks[ti].showTakes = true }
             }
+        }
+
+        if let loop = jamLoop {
+            // Paste the loop out to the end of the take, in whole passes. Stopping within the
+            // first beat of a new pass doesn't add another repeat.
+            let stopSong = map.songTime(atPlayerTime: max(0, nowPlayer))
+            let end = Session.jamEnd(loop: loop, stoppedAt: stopSong, beat: newSong.secondsPerBeat)
+            newSong = newSong.tilingLoop(loop, until: end, excluding: jamExcluded)
+            newSong.loopEnabled = false
+            jamLoop = nil
+            jamExcluded = []
         }
 
         applyAutoArm(&newSong, recorded: recordedTrackIDs)
