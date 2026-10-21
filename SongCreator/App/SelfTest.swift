@@ -172,6 +172,13 @@ enum SelfTest {
         audio.build(song: song, inputDevice: nil, outputDevice: nil)
         let sr = audio.sampleRate
         print("  sample rate \(sr)")
+        // A device change rebuilds the engine while the old one is still alive (the configuration-change
+        // notification holds it). Shared nodes must move over without AVAudioEngine throwing.
+        let oldEngine = audio.engine
+        audio.build(song: song, inputDevice: nil, outputDevice: nil)
+        audio.build(song: song, inputDevice: nil, outputDevice: nil)
+        try check(oldEngine !== audio.engine && audio.masterMixer.engine === audio.engine,
+                  "engine rebuilds while the old engine is still alive")
 
         func tone(_ name: String, _ freq: Double) throws {
             let f = try Recorder.makeFile(url: audioDir.appendingPathComponent(name), sampleRate: sr, channels: 1)
@@ -198,6 +205,7 @@ enum SelfTest {
         song.tracks = [track, keys]
         var mix = try render(song, audio: audio, dir: dir, length: 9, name: "comp.wav")
         let take1 = mix.window(1.5, 2.5), comped = mix.window(3.2, 3.8), back = mix.window(4.2, 4.8)
+        print(String(format: "  comp mix: take1 %.4f@%.0fHz comp %.4f@%.0fHz back %.4f", take1.rms, take1.freq, comped.rms, comped.freq, back.rms))
         try check(mix.window(0.1, 0.9).rms < 0.001, "silence before the first take")
         try check(take1.rms > 0.1 && abs(take1.freq - 440) < 15, "take 1 plays at 1 s (440 Hz)")
         try check(comped.rms > 0.1 && abs(comped.freq - 880) < 25, "comp switches to take 2 at 3–4 s")
@@ -275,6 +283,16 @@ enum SelfTest {
         try check(lp440 > 0.005 && lp880 < lp440 * 0.6, "insert plugin processes the audio")
         try check(mix.window(6.1, 6.8).rms > 0.002, "MIDI plays through the AU instrument")
         try check(audio.pluginState(lowpass.id) != nil, "plugin state can be saved")
+
+        // A device change mid-session: plugins reload into the new engine with their settings.
+        audio.build(song: song, inputDevice: nil, outputDevice: nil)
+        waitForPlugins(audio, [lowpass, dls])
+        audio.sync(song)
+        mix = try render(song, audio: audio, dir: dir, length: 9, name: "plugins-rebuilt.wav")
+        let re440 = mix.window(1.5, 2.5).rms, re880 = mix.window(3.2, 3.8).rms
+        print(String(format: "  after rebuild: 440 Hz %.4f, 880 Hz %.4f", re440, re880))
+        try check(re440 > 0.005 && re880 < re440 * 0.6 && mix.window(6.1, 6.8).rms > 0.002,
+                  "after an engine rebuild, plugins come back with their settings")
 
         print("Undo")
         let projectDir = dir.appendingPathComponent("UndoSong")

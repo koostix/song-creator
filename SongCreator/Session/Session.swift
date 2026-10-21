@@ -96,6 +96,7 @@ final class Session {
     @ObservationIgnored private var uiTimer: Timer?
     @ObservationIgnored private var tapTimes: [Date] = []
     @ObservationIgnored private var configObserver: NSObjectProtocol?
+    @ObservationIgnored private var lastRebuild = Date.distantPast
 
     // Recording state
     @ObservationIgnored private var recStartSong: Double = 0
@@ -150,6 +151,12 @@ final class Session {
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
             guard let self, (note.object as? AVAudioEngine) === self.audio.engine, self.exportProgress == nil else { return }
+            // Our own rebuild (device or buffer-size change) makes the new engine report a change too.
+            // Rebuilding again would loop, so just restart it.
+            if Date().timeIntervalSince(self.lastRebuild) < 1.5 {
+                try? self.audio.start()
+                return
+            }
             self.message = "Audio device changed — reconnected."
             self.rebuildEngine()
         }
@@ -168,6 +175,7 @@ final class Session {
     // MARK: - Engine
 
     func rebuildEngine() {
+        lastRebuild = Date()
         let wasPlaying = isPlaying
         if wasPlaying { stop() }
         let inDev = AudioDevices.device(uid: inputUID)?.id, outDev = AudioDevices.device(uid: outputUID)?.id

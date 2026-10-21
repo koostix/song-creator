@@ -96,13 +96,16 @@ final class AudioEngine {
     private(set) var stereo: AVAudioFormat!
     private(set) var tracks: [UUID: TrackNodes] = [:]
 
-    let masterMixer = AVAudioMixerNode()
-    let limiter = AVAudioUnitEffect(audioComponentDescription: AudioEngine.limiterDesc)
-    let reverbBus = AVAudioMixerNode()
-    let reverb = AVAudioUnitReverb()
-    let delayBus = AVAudioMixerNode()
-    let delay = AVAudioUnitDelay()
-    let clickPlayer = AVAudioPlayerNode()
+    // Created fresh with each engine: audio units carry render state that doesn't move between engines.
+    private(set) var masterMixer = AVAudioMixerNode()
+    private(set) var limiter = AVAudioUnitEffect(audioComponentDescription: AudioEngine.limiterDesc)
+    private(set) var reverbBus = AVAudioMixerNode()
+    private(set) var reverb = AVAudioUnitReverb()
+    private(set) var delayBus = AVAudioMixerNode()
+    private(set) var delay = AVAudioUnitDelay()
+    private(set) var clickPlayer = AVAudioPlayerNode()
+    /// Plugin state carried across an engine rebuild, applied when each plugin reloads.
+    private var carriedStates: [UUID: [String: Any]] = [:]
     private(set) var clickFormat: AVAudioFormat!
     /// Whether the selected input device has any channels. Touching inputNode without one is unsafe.
     private(set) var hasInput = false
@@ -129,8 +132,23 @@ final class AudioEngine {
     /// Build a fresh engine graph, optionally on specific devices.
     func build(song: Song, inputDevice: AudioDeviceID?, outputDevice: AudioDeviceID?) {
         engine.stop()
-        for unit in units.values where unit.engine != nil { unit.engine?.detach(unit) }
+        // Nothing is carried into the new engine: the old one may still be alive (a configuration-change
+        // notification holds it), and its nodes and audio units belong to it. Plugins are reloaded into the
+        // new engine with their current state.
+        for (id, unit) in units {
+            carriedStates[id] = unit.auAudioUnit.fullState
+            PluginWindows.close(id)
+        }
+        units = [:]
+        pluginErrors = [:]
         engine = AVAudioEngine()
+        masterMixer = AVAudioMixerNode()
+        limiter = AVAudioUnitEffect(audioComponentDescription: AudioEngine.limiterDesc)
+        reverbBus = AVAudioMixerNode()
+        reverb = AVAudioUnitReverb()
+        delayBus = AVAudioMixerNode()
+        delay = AVAudioUnitDelay()
+        clickPlayer = AVAudioPlayerNode()
         tracks = [:]
         lastReverbRoom = nil
         inputRing = nil
@@ -356,7 +374,9 @@ final class AudioEngine {
                     self.onPluginsChanged?()
                     return
                 }
-                if let data = slot.state,
+                if let carried = self.carriedStates.removeValue(forKey: slot.id) {
+                    unit.auAudioUnit.fullState = carried
+                } else if let data = slot.state,
                    let state = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
                     unit.auAudioUnit.fullState = state
                 }
