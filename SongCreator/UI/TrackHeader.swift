@@ -27,7 +27,12 @@ struct TrackHeader: View {
                 HStack(spacing: 6) {
                     Image(systemName: track.kind == .midi ? "pianokeys" : (track.channels == 2 ? "waveform.path" : "waveform"))
                         .font(.system(size: 10)).foregroundStyle(Theme.color(track.colorIndex))
-                    RenameField(text: track.name) { name in
+                    RenameField(text: track.name, isEditing: Binding(
+                        get: { session.renamingTrackID == track.id },
+                        set: { on in
+                            if on { session.startRenaming(track.id) }
+                            else if session.renamingTrackID == track.id { session.renamingTrackID = nil }
+                        })) { name in
                         session.updateTrack(track.id) { $0.name = name }
                     }
                     FXMenu(session: session, track: track)

@@ -106,11 +106,15 @@ struct ArrangeView: View {
 }
 
 struct TrackListCorner: View {
-    let session: Session
+    @Bindable var session: Session
     var body: some View {
         HStack(spacing: 8) {
-            Text("TRACKS").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.dim)
-            Spacer()
+            // Mixer (X) and computer keyboard as MIDI (⌘K), next to the tracks they work on.
+            LitButton(label: "MIX", on: session.showMixer, width: 34, help: "Mixer (X)") {
+                withAnimation(.easeOut(duration: 0.15)) { session.showMixer.toggle() }
+            }
+            TypingToggle(session: session)
+            Spacer(minLength: 4)
             Button { session.addTrack(kind: .audio) } label: { Image(systemName: "waveform.badge.plus") }
                 .help("New audio track (T)")
             Button { session.addTrack(kind: .midi) } label: { Image(systemName: "pianokeys") }

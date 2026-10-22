@@ -201,39 +201,54 @@ extension EnvironmentValues {
 struct RenameField: View {
     let text: String
     var font: Font = .system(size: 12, weight: .semibold)
+    /// When given, editing is controlled from outside (e.g. Tab moving the rename to the next track).
+    var isEditing: Binding<Bool>? = nil
     let onCommit: (String) -> Void
 
-    @State private var editing = false
+    @State private var localEditing = false
     @State private var draft = ""
+    @State private var cancelled = false
     @FocusState private var focused: Bool
 
-    var body: some View {
-        if editing {
-            TextField("", text: $draft)
-                .textFieldStyle(.plain)
-                .font(font)
-                .focused($focused)
-                .onSubmit(commit)
-                .onExitCommand { editing = false }
-                .onChange(of: focused) { _, f in if !f && editing { commit() } }
-                .onAppear { focused = true }
-        } else {
-            Text(text)
-                .font(font)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) {
-                    draft = text
-                    editing = true
-                }
-                .help("\(text) — double-click to rename")
-        }
+    private var editing: Bool { isEditing?.wrappedValue ?? localEditing }
+
+    private func setEditing(_ on: Bool) {
+        if let b = isEditing { b.wrappedValue = on } else { localEditing = on }
     }
 
-    private func commit() {
-        let t = draft.trimmingCharacters(in: .whitespaces)
-        editing = false
-        if !t.isEmpty && t != text { onCommit(t) }
+    var body: some View {
+        Group {
+            if editing {
+                TextField("", text: $draft)
+                    .textFieldStyle(.plain)
+                    .font(font)
+                    .focused($focused)
+                    .onSubmit { setEditing(false) }
+                    .onExitCommand { cancelled = true; setEditing(false) }
+                    .onChange(of: focused) { _, f in if !f && editing { setEditing(false) } }
+                    .onAppear {
+                        draft = text
+                        cancelled = false
+                        focused = true
+                    }
+            } else {
+                Text(text)
+                    .font(font)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { setEditing(true) }
+                    .help("\(text) — double-click to rename")
+            }
+        }
+        // Save whenever editing ends, however it ends (Return, Tab, clicking away), unless Escape cancelled it.
+        .onChange(of: editing) { was, now in
+            guard was, !now else { return }
+            if !cancelled {
+                let t = draft.trimmingCharacters(in: .whitespaces)
+                if !t.isEmpty && t != text { onCommit(t) }
+            }
+            cancelled = false
+        }
     }
 }

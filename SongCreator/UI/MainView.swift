@@ -47,6 +47,11 @@ struct MainView: View {
             if event.type == .keyUp {
                 return session.typingKeyUp(keyCode: event.keyCode) ? nil : event
             }
+            // Tab while renaming a track moves on to the next track's name (⇧Tab: the previous one).
+            if event.keyCode == 48, session.renamingTrackID != nil {
+                session.renameNext(forward: !event.modifierFlags.contains(.shift))
+                return nil
+            }
             if let responder = NSApp.keyWindow?.firstResponder, responder is NSText { return event }
             if NSApp.keyWindow?.attachedSheet != nil || showExport { return event }
             let flags = event.modifierFlags.intersection([.command, .option, .shift, .control])
@@ -224,9 +229,7 @@ struct TransportBar: View {
 
             Spacer(minLength: 4)
 
-            // Play, view, output
-            TypingToggle(session: session)
-            BarDivider()
+            // View and output
             HStack(spacing: 8) {
                 Button { session.pixelsPerSecond = max(4, session.pixelsPerSecond / 1.4) } label: { Image(systemName: "minus.magnifyingglass") }
                     .help("Zoom out (-)")
@@ -237,9 +240,6 @@ struct TransportBar: View {
             }
             .buttonStyle(.plain).foregroundStyle(Theme.dim)
             BarDivider()
-            LitButton(label: "MIX", on: session.showMixer, width: 34, help: "Mixer (X)") {
-                withAnimation(.easeOut(duration: 0.15)) { session.showMixer.toggle() }
-            }
             Button {
                 NotificationCenter.default.post(name: .showExport, object: nil)
             } label: {

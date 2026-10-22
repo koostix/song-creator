@@ -25,10 +25,9 @@ enum SelfTest {
             song.loop = TimeRange(start: 0, end: 8)
             let model = AppModel()
             let session = Session(projectURL: project, song: song)
-            let savedJam = Prefs.jamMode
+            let savedJam = Prefs.jamMode   // restored before exit(), which skips defer blocks
             session.jamMode = true
             session.musicalTyping = true
-            defer { Prefs.jamMode = savedJam }
             for (w, mixer) in [(1180.0, false), (1600.0, false), (1180.0, true)] {
                 session.showMixer = mixer
                 let view = MainView(session: session).environment(model)
@@ -94,6 +93,8 @@ enum SelfTest {
                     try? png.write(to: dir.appendingPathComponent("\(name).png"))
                 }
             }
+            Prefs.jamMode = savedJam
+            ProjectStore.rootOverride = nil
             print("SNAPSHOT DONE")
             exit(0)
         }
@@ -593,6 +594,20 @@ enum SelfTest {
                   "with protection off, monitoring follows the I button")
         session.feedbackProtection = true
         session.updateTrack(audioTrack, undoable: false) { $0.monitor = false }
+
+        print("Renaming tracks with Tab")
+        while session.song.tracks.count < 3 { session.addTrack(kind: .audio) }
+        let ids = session.song.tracks.map(\.id)
+        session.startRenaming(ids[0])
+        session.renameNext(forward: true)
+        try check(session.renamingTrackID == ids[1] && session.selectedTrackID == ids[1], "Tab moves to the next track and selects it")
+        session.renameNext(forward: false)
+        try check(session.renamingTrackID == ids[0], "⇧Tab moves back")
+        session.renameNext(forward: false)
+        try check(session.renamingTrackID == nil, "⇧Tab on the first track finishes")
+        session.startRenaming(ids[ids.count - 1])
+        session.renameNext(forward: true)
+        try check(session.renamingTrackID == nil, "Tab on the last track finishes")
 
         print("Auto-arm monitoring")
         for mode in [AutoArmMode.newTrack, .nextTrack] {

@@ -13,9 +13,16 @@ xcodebuild -project SongCreator.xcodeproj -scheme SongCreator -configuration Rel
 APP=build/Build/Products/Release/SongCreator.app
 codesign --force --deep --sign - -r='designated => identifier "com.paulshuler.SongCreator"' "$APP"
 
+# Quit the running copy and wait until it's really gone; otherwise `open` would just bring the
+# old version back to the front.
 osascript -e 'quit app "Song Creator"' >/dev/null 2>&1 || true
-sleep 1
+for _ in $(seq 1 20); do
+    pgrep -f "/Applications/Song Creator.app/" >/dev/null || break
+    sleep 0.5
+done
+pkill -f "/Applications/Song Creator.app/" 2>/dev/null || true
+sleep 0.5
 rm -rf "/Applications/Song Creator.app"
 ditto "$APP" "/Applications/Song Creator.app"
 open "/Applications/Song Creator.app"
-echo "Installed /Applications/Song Creator.app"
+echo "Installed /Applications/Song Creator.app (build $(date +%H:%M:%S))"

@@ -73,6 +73,25 @@ final class Session {
     var selection: TimeRange?
     var selectedTrackID: UUID? { didSet { updateSelectedMIDI() } }
     var selectedRegions: Set<UUID> = []
+    /// The track whose name is being edited; Tab moves this to the next track.
+    var renamingTrackID: UUID?
+
+    func startRenaming(_ id: UUID) {
+        renamingTrackID = id
+        selectedTrackID = id
+    }
+
+    /// Tab / ⇧Tab while renaming: the current name is saved (by its field) and the next track opens for
+    /// renaming. Past either end, renaming finishes.
+    func renameNext(forward: Bool) {
+        guard let id = renamingTrackID, let i = song.trackIndex(id) else { renamingTrackID = nil; return }
+        let j = i + (forward ? 1 : -1)
+        if song.tracks.indices.contains(j) {
+            startRenaming(song.tracks[j].id)
+        } else {
+            renamingTrackID = nil
+        }
+    }
     @ObservationIgnored var clipboard: RegionClipboard?
     @ObservationIgnored private var gestureBase: Song?
     var showMixer = false
