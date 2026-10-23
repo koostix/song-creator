@@ -728,6 +728,28 @@ enum SelfTest {
             try check(received.all().contains { $0.status == 0xB4 && $0.d1 == 123 }, "stop sends all-notes-off to the device")
         }
 
+        print("Timeline zoom per song")
+        do {
+            let zdir = dir.appendingPathComponent("ZoomSong")
+            try FileManager.default.createDirectory(at: zdir, withIntermediateDirectories: true)
+            var zs = Song.newIdea()
+            zs.tempo = 120
+            let first = Session(projectURL: zdir, song: zs)
+            first.timelineWidth = 1000
+            try check(abs(first.pixelsPerSecond * max(zs.contentEnd, zs.secondsPerBar * 8) * 1.04 - 1000) < 0.01,
+                      "a song with no saved view opens zoomed to fit")
+            first.pixelsPerSecond = 123
+            first.scrollX = 7
+            first.close()
+            let reopened = Session(projectURL: zdir, song: zs)
+            reopened.timelineWidth = 1000
+            try check(reopened.pixelsPerSecond == 123 && reopened.scrollX == 7, "reopening restores the last zoom and scroll")
+            reopened.close()
+            var all = UserDefaults.standard.dictionary(forKey: "timelineView") ?? [:]
+            all[zs.id.uuidString] = nil
+            UserDefaults.standard.set(all, forKey: "timelineView")
+        }
+
         print("Auto-arm monitoring")
         for mode in [AutoArmMode.newTrack, .nextTrack] {
             var s = Song.newIdea()

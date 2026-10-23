@@ -45,6 +45,16 @@ enum Prefs {
         get { defaults.object(forKey: "pluginsOutOfProcess") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "pluginsOutOfProcess") }
     }
+    /// Each song's last timeline zoom and scroll, by song ID.
+    static func timelineView(_ song: UUID) -> (pps: Double, scroll: Double)? {
+        guard let v = (defaults.dictionary(forKey: "timelineView") as? [String: [Double]])?[song.uuidString], v.count == 2 else { return nil }
+        return (v[0], v[1])
+    }
+    static func setTimelineView(_ song: UUID, pps: Double, scroll: Double) {
+        var all = defaults.dictionary(forKey: "timelineView") as? [String: [Double]] ?? [:]
+        all[song.uuidString] = [pps, scroll]
+        defaults.set(all, forKey: "timelineView")
+    }
     static var jamMode: Bool {
         get { defaults.bool(forKey: "jamMode") }
         set { defaults.set(newValue, forKey: "jamMode") }
@@ -102,7 +112,16 @@ final class Session {
     var showMixer = false
     var pixelsPerSecond: Double = 40
     var scrollX: Double = 0
-    var timelineWidth: Double = 800
+    var timelineWidth: Double = 800 {
+        didSet {
+            // A song opened without a saved view zooms to fit once the timeline's real width is known.
+            if needsFit, timelineWidth > 300 {
+                needsFit = false
+                zoomToFit()
+            }
+        }
+    }
+    @ObservationIgnored private var needsFit = false
     var followPlayhead = true
     var returnOnStop = Prefs.returnOnStop { didSet { Prefs.returnOnStop = returnOnStop } }
     var latencyOffsetMs = Prefs.latencyOffsetMs { didSet { Prefs.latencyOffsetMs = latencyOffsetMs } }
@@ -247,6 +266,12 @@ final class Session {
         }
         armedMIDI = song.tracks.filter { $0.kind == .midi && $0.armed }.map(\.id)
         updateSelectedMIDI()   // which MIDI tracks play outboard gear, before any note arrives
+        if let view = Prefs.timelineView(song.id) {
+            pixelsPerSecond = min(800, max(4, view.pps))
+            scrollX = max(0, view.scroll)
+        } else {
+            needsFit = true
+        }
         rebuildEngine()
         startMIDI()
         loadWaveforms()
@@ -276,6 +301,7 @@ final class Session {
 
     func close() {
         stop()
+        saveTimelineView()
         uiTimer?.invalidate()
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         if let l = speakerListener { AudioDevices.removeListener(l) }
@@ -499,6 +525,11 @@ final class Session {
     // MARK: - Zoom
 
     /// Fit the whole song (at least 8 bars, and the loop if it's on) in the window.
+    /// Remember the zoom and scroll for this song (on close and with every autosave).
+    func saveTimelineView() {
+        Prefs.setTimelineView(song.id, pps: pixelsPerSecond, scroll: scrollX)
+    }
+
     func zoomToFit() {
         var end = max(song.contentEnd, song.secondsPerBar * 8)
         if song.loopEnabled { end = max(end, song.loop.end) }
@@ -570,6 +601,7 @@ final class Session {
 
     /// Save the song. Plugin state is read from the live plugins (slow for big ones, so autosave does it sparingly).
     func saveNow(capturePlugins: Bool = true) {
+        saveTimelineView()
         saveWork?.cancel()
         if capturePlugins {
             for t in song.tracks {
