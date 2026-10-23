@@ -15,7 +15,7 @@ final class AppModel {
 
     /// Start a new song, inside `project` if one is given.
     func newSong(in project: String? = nil) {
-        let song = Song.newIdea()
+        let song = ProjectStore.newSong()
         do {
             let url = try ProjectStore.create(song, in: SongLibrary.folder(for: project))
             open(url: url, song: song)
@@ -86,6 +86,13 @@ struct SongCreatorApp: App {
                     .keyboardShortcut("i", modifiers: [.command, .shift])
                 Button("Export Mixdown…") { NotificationCenter.default.post(name: .showExport, object: nil) }
                     .keyboardShortcut("e")
+                Divider()
+                Button("Save as Default for New Songs") { model.session?.saveAsNewSongDefault() }
+                    .disabled(model.session == nil)
+                Button("Reset New Song Default") {
+                    ProjectStore.clearTemplate()
+                    model.session?.message = "New songs start from the plain one-track setup again."
+                }
                 Divider()
                 Button("Show in Finder") {
                     if let url = model.session?.projectURL { NSWorkspace.shared.activateFileViewerSelecting([url]) }

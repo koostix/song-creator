@@ -28,6 +28,8 @@ final class Transport {
     private var map = TimelineMap(sampleRate: 48000, startTime: 0, loop: nil)
     private var scheduledUntil: Int64 = 0
     private var midiBase: Int64?
+    /// Host time of player frame 0 during realtime playback (nil offline): external MIDI is timestamped from it.
+    private var runAnchor: UInt64?
     private var countInFrames: (start: Int64, end: Int64) = (0, 0)
 
     private let chunkFrames: Int64 = 4096
@@ -89,6 +91,7 @@ final class Transport {
             // The render sample that plays at the anchor: MIDI is scheduled against it, and with the app's own
             // hardware connection (whose engine times carry no host time) so are the players.
             midiBase = audio.renderSample(atHost: anchor)
+            runAnchor = anchor
             fill(throughPlayerFrame: Int64(lookahead * audio.sampleRate))
 
             let when = audio.usesOwnIO
@@ -117,14 +120,18 @@ final class Transport {
     }
 
     func stop() {
-        queue.sync {
+        let externals = queue.sync { () -> [ExternalMIDI] in
             timer?.cancel()
             timer = nil
             autoTimer?.cancel()
             autoTimer = nil
             request = nil
+            runAnchor = nil
             lock.lock(); _map = nil; lock.unlock()
+            return song.tracks.compactMap(\.external)
         }
+        // Outboard gear: drop notes already queued with Core MIDI and turn everything off.
+        for ext in externals { MIDIOutput.shared.silence(device: ext.deviceID, channel: ext.channel) }
         for n in audio.tracks.values {
             n.player?.stop()
             n.instrument?.reset()
@@ -153,6 +160,7 @@ final class Transport {
     /// Set up the timeline for a run. Queue-confined (or exclusive offline use).
     func prepare(_ req: PlayRequest) {
         request = req
+        runAnchor = nil
         song = req.song
         let sr = audio.sampleRate
         map = TimelineMap(sampleRate: sr, startTime: req.position - req.countIn, loop: req.loop)
@@ -215,8 +223,12 @@ final class Transport {
     }
 
     private func scheduleMIDI(_ track: Track, nodes: TrackNodes, pieces: [TimelinePiece]) {
-        guard let inst = nodes.instrument, let send = inst.auAudioUnit.scheduleMIDIEventBlock else { return }
         let sr = audio.sampleRate
+        let external = track.external
+        // External gear plays live only (it can't be rendered offline), timestamped against the hardware clock.
+        if external != nil && runAnchor == nil { return }
+        let send = external == nil ? nodes.instrument?.auAudioUnit.scheduleMIDIEventBlock : nil
+        if external == nil && send == nil { return }
         let loopEnd = map.loop.map { Double($0.end) / sr }
         for p in pieces {
             let a = Double(p.songStart) / sr, b = Double(p.songStart + p.length) / sr
@@ -227,17 +239,25 @@ final class Transport {
                     var off = min(on + note.duration, seg.end)
                     if let loopEnd { off = min(off, loopEnd) }
                     if on >= seg.start, on < seg.end, on >= a, on < b {
-                        emit(send, p, on, [0x90, note.pitch, note.velocity])
+                        emit(p, on, [0x90, note.pitch, note.velocity])
                     }
                     if on >= seg.start, on < seg.end, off > a, off <= b {
-                        emit(send, p, off, [0x80, note.pitch, 0])
+                        emit(p, off, [0x80, note.pitch, 0])
                     }
                 }
             }
         }
 
-        func emit(_ send: AUScheduleMIDIEventBlock, _ p: TimelinePiece, _ songTime: Double, _ bytes: [UInt8]) {
+        func emit(_ p: TimelinePiece, _ songTime: Double, _ bytes: [UInt8]) {
             let playerFrame = p.playerStart + Int64((songTime * sr).rounded()) - p.songStart
+            if let ext = external, let anchor = runAnchor {
+                // Due when the rest of the song is heard (output latency), minus the gear's own delay.
+                let offset = Double(playerFrame) / sr + audio.outputLatency - ext.latencyMs / 1000
+                let host = offset >= 0 ? anchor + HostTime.ticks(offset) : anchor &- HostTime.ticks(-offset)
+                MIDIOutput.shared.send(bytes[0], bytes[1], bytes[2], to: ext.deviceID, channel: ext.channel, at: host)
+                return
+            }
+            guard let send else { return }
             let time: AUEventSampleTime
             if let base = midiBase {
                 time = AUEventSampleTime(base + playerFrame)

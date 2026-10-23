@@ -49,6 +49,15 @@ final class TrackNodes {
     let comp = AVAudioUnitEffect(audioComponentDescription: AudioEngine.dynamicsDesc)
     let strip = AVAudioMixerNode()
     var monitorNode: AVAudioSourceNode?
+    enum MonitorMode { case none, input, monoReturn, stereoReturn }
+    /// What live input feeds this strip: an audio track's input, or a MIDI track's gear audio return.
+    let monitorMode: MonitorMode
+
+    static func monitorMode(for track: Track) -> MonitorMode {
+        if track.kind == .audio { return .input }
+        guard track.external?.audioReturn == true else { return .none }
+        return track.channels == 1 ? .monoReturn : .stereoReturn
+    }
     var monitorReader: MonitorReader?
     /// Insert slots currently wired between the compressor and the strip.
     var inserts: [UUID] = []
@@ -64,6 +73,7 @@ final class TrackNodes {
         id = track.id
         kind = track.kind
         inputChannel = track.inputChannel
+        monitorMode = TrackNodes.monitorMode(for: track)
         format = AVAudioFormat(standardFormatWithSampleRate: sampleRate,
                                channels: AVAudioChannelCount(track.kind == .midi ? 2 : track.channels))!
         if track.kind == .audio {
@@ -486,7 +496,8 @@ final class AudioEngine {
                existing.kind == track.kind,
                existing.format.channelCount == (track.kind == .midi ? 2 : AVAudioChannelCount(track.channels)),
                existing.instrumentSlot == plugin?.0,
-               existing.inputChannel == track.inputChannel {
+               existing.inputChannel == track.inputChannel,
+               existing.monitorMode == TrackNodes.monitorMode(for: track) {
                 wireInserts(existing, track)
                 continue
             }
@@ -515,8 +526,10 @@ final class AudioEngine {
             AVAudioConnectionPoint(node: delayBus, bus: n.delayBus),
         ], fromBus: 0, format: stereo)
 
-        if track.kind == .audio, let ring = inputRing {
-            let reader = MonitorReader(ring: ring, firstChannel: track.inputChannel + inputChannelOffset)
+        // Live input into the strip: an audio track's input, or a MIDI track's outboard gear coming back in.
+        if n.monitorMode != .none, let ring = inputRing {
+            let reader = MonitorReader(ring: ring, firstChannel: track.inputChannel + inputChannelOffset,
+                                       mono: n.monitorMode == .monoReturn)
             let node = AVAudioSourceNode(format: n.format) { isSilence, _, frames, abl in
                 reader.render(isSilence, Int(frames), abl)
             }
@@ -695,7 +708,9 @@ final class AudioEngine {
             setLevel(track, n, anySolo: anySolo, at: automationTime)
             n.strip.destination(forMixer: reverbBus, bus: n.reverbBus)?.volume = Float(s.reverbSend)
             n.strip.destination(forMixer: delayBus, bus: n.delayBus)?.volume = Float(s.delaySend)
-            n.monitorReader?.enabled.store(track.monitor && liveInput && !monitorMuted, ordering: .relaxed)
+            // Gear coming back from a MIDI track isn't a mic, so feedback protection doesn't apply to it.
+            let wanted = track.kind == .audio ? track.monitor && !monitorMuted : n.monitorMode != .none
+            n.monitorReader?.enabled.store(wanted && liveInput, ordering: .relaxed)
 
             n.eq.bypass = !s.eqOn && !s.hpfOn
             n.eq.bands[0].bypass = !s.hpfOn

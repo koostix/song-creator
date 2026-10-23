@@ -451,6 +451,11 @@ struct ExportSheet: View {
             }
             Text("Files are saved in the song's Mixdowns folder. The master limiter (on the mixer) keeps peaks below 0 dBFS.")
                 .font(.caption).foregroundStyle(Theme.dim)
+            if session.song.tracks.contains(where: { $0.external != nil }) {
+                Label("External MIDI tracks play live gear, so they aren't in the mixdown. Record the gear onto an audio track first to include it.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(Color.orange)
+            }
 
             HStack {
                 Spacer()

@@ -1,5 +1,6 @@
 #if DEBUG
 import AVFoundation
+import CoreMIDI
 import SwiftUI
 
 /// `SongCreator --selftest <folder>`: builds songs in code, renders them offline and
@@ -627,6 +628,105 @@ enum SelfTest {
         session.startRenaming(ids[ids.count - 1])
         session.renameNext(forward: true)
         try check(session.renamingTrackID == nil, "Tab on the last track finishes")
+
+        print("New-song default")
+        do {
+            let saveRoot = ProjectStore.rootOverride
+            ProjectStore.rootOverride = dir.appendingPathComponent("TemplateLib")
+            defer { ProjectStore.rootOverride = saveRoot }
+            ProjectStore.clearTemplate()
+            try check(ProjectStore.newSong().tracks.count == 1, "without a default, New Song is the plain one-track start")
+            var setup = Song.newIdea()
+            setup.tempo = 94
+            setup.countInBars = 2
+            var keysT = Track(name: "Synth", kind: .midi, channels: 2)
+            keysT.external = ExternalMIDI(deviceID: 42, deviceName: "Prophet", channel: 3)
+            keysT.takes = [Take(name: "t", start: 0, duration: 2, notes: [MIDINote(pitch: 60, velocity: 100, start: 0, duration: 1)])]
+            keysT.assign(takeID: keysT.takes[0].id, over: keysT.takes[0].range)
+            keysT.volumeAuto = [AutoPoint(time: 0, value: -6)]
+            keysT.strip.reverbSend = 0.4
+            keysT.inserts = [PluginSlot(name: "Comp", manufacturer: "X", type: 1, subType: 2, manufacturerCode: 3, state: Data([1, 2, 3]))]
+            setup.tracks.append(keysT)
+            setup.markers = [Marker(name: "Verse", position: 4)]
+            try ProjectStore.saveTemplate(setup)
+            let fresh = ProjectStore.newSong()
+            let synth = fresh.tracks.first { $0.name == "Synth" }
+            try check(fresh.tracks.count == 2 && fresh.tempo == 94 && fresh.countInBars == 2 && fresh.markers.isEmpty,
+                      "New Song starts from the saved setup (tracks, tempo, count-in), without markers")
+            try check(synth?.takes.isEmpty == true && synth?.comp.isEmpty == true && synth?.volumeAuto.isEmpty == true,
+                      "recordings and automation are left out")
+            try check(synth?.external?.deviceName == "Prophet" && synth?.external?.channel == 3 && synth?.strip.reverbSend == 0.4
+                      && synth?.inserts.first?.state == Data([1, 2, 3]),
+                      "instrument (external MIDI), strip and plugin settings carry over")
+            let again = ProjectStore.newSong()
+            try check(synth?.id != keysT.id && again.tracks.last?.id != synth?.id && synth?.inserts.first?.id != keysT.inserts.first?.id
+                      && fresh.id != again.id, "every new song gets fresh IDs")
+            ProjectStore.clearTemplate()
+            try check(ProjectStore.newSong().tracks.count == 1, "reset goes back to the plain start")
+        }
+
+        print("External MIDI device")
+        do {
+            // A virtual MIDI device in this process records what it receives.
+            final class Received: @unchecked Sendable {
+                let lock = NSLock()
+                var events: [(status: UInt8, d1: UInt8, d2: UInt8, time: UInt64)] = []
+                func add(_ e: (UInt8, UInt8, UInt8, UInt64)) { lock.lock(); events.append(e); lock.unlock() }
+                func all() -> [(status: UInt8, d1: UInt8, d2: UInt8, time: UInt64)] { lock.lock(); defer { lock.unlock() }; return events }
+            }
+            let received = Received()
+            var client = MIDIClientRef(), virtualDest = MIDIEndpointRef()
+            MIDIClientCreateWithBlock("SelfTest MIDI" as CFString, &client, nil)
+            MIDIDestinationCreateWithProtocol(client, "SC Test Synth" as CFString, ._1_0, &virtualDest) { list, _ in
+                for packet in list.unsafeSequence() {
+                    let count = Int(packet.pointee.wordCount)
+                    let words: [UInt32] = withUnsafeBytes(of: packet.pointee.words) { Array($0.bindMemory(to: UInt32.self).prefix(count)) }
+                    for w in words where w >> 28 == 0x2 {
+                        received.add((UInt8((w >> 16) & 0xFF), UInt8((w >> 8) & 0x7F), UInt8(w & 0x7F), packet.pointee.timeStamp))
+                    }
+                }
+            }
+            defer { MIDIEndpointDispose(virtualDest); MIDIClientDispose(client) }
+            var vid: Int32 = 0
+            MIDIObjectGetIntegerProperty(virtualDest, kMIDIPropertyUniqueID, &vid)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            try check(MIDIOutput.destinations().contains { $0.id == vid }, "MIDI outputs include the device")
+
+            let extDir = dir.appendingPathComponent("ExternalSong")
+            try FileManager.default.createDirectory(at: extDir, withIntermediateDirectories: true)
+            var es = Song(name: "ext")
+            es.clickEnabled = false
+            es.countInBars = 0
+            var synthT = Track(name: "Synth", kind: .midi, channels: 2, armed: true)
+            synthT.external = ExternalMIDI(deviceID: vid, deviceName: "SC Test Synth", channel: 5)
+            let noteTake = Take(name: "t", start: 0, duration: 2, notes: [MIDINote(pitch: 64, velocity: 90, start: 0.5, duration: 0.25)])
+            synthT.takes = [noteTake]
+            synthT.assign(takeID: noteTake.id, over: noteTake.range)
+            es.tracks = [synthT]
+            let es2 = Session(projectURL: extDir, song: es)
+            defer { es2.close() }
+
+            es2.handleMIDI(0x90, 60, 100, HostTime.now)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            try check(received.all().contains { $0.status == 0x94 && $0.d1 == 60 && $0.d2 == 100 },
+                      "a live note goes to the device on channel 5")
+            es2.handleMIDI(0x80, 60, 0, HostTime.now)
+
+            let before = received.all().count
+            es2.play(from: 0)
+            let anchor = es2.transport.timing?.anchorHost ?? 0
+            RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+            let played = received.all().dropFirst(before)
+            let noteOn = played.first { $0.status == 0x94 && $0.d1 == 64 && $0.d2 == 90 }
+            let noteOff = played.first { $0.status == 0x84 && $0.d1 == 64 }
+            let due = 0.5 + es2.audio.outputLatency
+            let sent = noteOn.map { HostTime.seconds($0.time) - HostTime.seconds(anchor) } ?? -1
+            print(String(format: "  note-on timestamp %.3f s after start (due %.3f s)", sent, due))
+            try check(noteOn != nil && noteOff != nil && abs(sent - due) < 0.005, "recorded notes play back to the device, timestamped on time")
+            es2.stop()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            try check(received.all().contains { $0.status == 0xB4 && $0.d1 == 123 }, "stop sends all-notes-off to the device")
+        }
 
         print("Auto-arm monitoring")
         for mode in [AutoArmMode.newTrack, .nextTrack] {

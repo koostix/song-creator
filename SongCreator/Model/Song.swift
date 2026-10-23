@@ -105,6 +105,32 @@ enum AutoParam: String, Codable, CaseIterable, Identifiable {
     var label: String { self == .volume ? "Volume" : "Pan" }
 }
 
+/// A MIDI track playing outboard gear: its notes go out to a MIDI device instead of an instrument.
+struct ExternalMIDI: Codable, Equatable {
+    var deviceID: Int32
+    var deviceName: String
+    var channel = 1
+    /// Hear the gear's audio, plugged into the track's input channel(s), through the track's strip.
+    var audioReturn = false
+    /// Send notes this much earlier to make up for the gear's own delay.
+    var latencyMs: Double = 0
+
+    init(deviceID: Int32, deviceName: String, channel: Int = 1) {
+        self.deviceID = deviceID
+        self.deviceName = deviceName
+        self.channel = channel
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        deviceID = try c.decode(Int32.self, forKey: .deviceID)
+        deviceName = try c.decodeIfPresent(String.self, forKey: .deviceName) ?? "MIDI device"
+        channel = try c.decodeIfPresent(Int.self, forKey: .channel) ?? 1
+        audioReturn = try c.decodeIfPresent(Bool.self, forKey: .audioReturn) ?? false
+        latencyMs = try c.decodeIfPresent(Double.self, forKey: .latencyMs) ?? 0
+    }
+}
+
 /// A third-party Audio Unit on a track.
 struct PluginSlot: Codable, Equatable, Identifiable {
     var id = UUID()
@@ -168,6 +194,8 @@ struct Track: Codable, Identifiable, Equatable {
     var inserts: [PluginSlot] = []
     /// Audio Unit instrument for MIDI tracks; nil uses the built-in General MIDI sounds.
     var instrument: PluginSlot?
+    /// Outboard gear for MIDI tracks; when set, notes go to it instead of an instrument.
+    var external: ExternalMIDI?
 
     func take(_ id: UUID) -> Take? { takes.first { $0.id == id } }
 
@@ -258,6 +286,34 @@ struct Song: Codable, Equatable {
         return String(format: "%d.%d.%02d", bar + 1, beat + 1, max(0, tick))
     }
 
+    /// This song's setup without its recordings: tracks, instruments, strips, plugins (with their
+    /// settings), sends, master, tempo and recording options. Takes, markers and automation are left
+    /// out and every ID is new.
+    func asTemplate() -> Song {
+        var s = self
+        s.id = UUID()
+        s.sampleRate = 0
+        s.markers = []
+        s.loopEnabled = false
+        s.punchEnabled = false
+        s.tracks = tracks.map { t in
+            var t = t
+            t.id = UUID()
+            t.takes = []
+            t.comp = []
+            t.volumeAuto = []
+            t.panAuto = []
+            t.showTakes = false
+            t.showAutomation = false
+            t.mute = false
+            t.solo = false
+            t.inserts = t.inserts.map { var slot = $0; slot.id = UUID(); return slot }
+            if var inst = t.instrument { inst.id = UUID(); t.instrument = inst }
+            return t
+        }
+        return s
+    }
+
     static func newIdea() -> Song {
         let f = DateFormatter()
         f.dateFormat = "MMM d h.mm a"
@@ -314,5 +370,6 @@ extension Track {
         autoParam = try c.decodeIfPresent(AutoParam.self, forKey: .autoParam) ?? d.autoParam
         inserts = try c.decodeIfPresent([PluginSlot].self, forKey: .inserts) ?? []
         instrument = try c.decodeIfPresent(PluginSlot.self, forKey: .instrument)
+        external = try c.decodeIfPresent(ExternalMIDI.self, forKey: .external)
     }
 }

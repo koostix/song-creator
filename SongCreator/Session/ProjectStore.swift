@@ -45,6 +45,33 @@ enum ProjectStore {
         return url
     }
 
+    // MARK: - New-song default
+
+    /// The saved setup New Song starts from (hidden in the library folder).
+    static var templateURL: URL { root.appendingPathComponent(".new-song-default.json") }
+
+    static var hasTemplate: Bool { FileManager.default.fileExists(atPath: templateURL.path) }
+
+    /// Keep a song's setup, without its recordings, as the start for new songs.
+    static func saveTemplate(_ song: Song) throws {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(song.asTemplate()).write(to: templateURL, options: .atomic)
+    }
+
+    static func clearTemplate() { try? FileManager.default.removeItem(at: templateURL) }
+
+    /// A brand-new song: from the saved default if there is one, else the plain one-track start.
+    static func newSong() -> Song {
+        let fresh = Song.newIdea()
+        guard let data = try? Data(contentsOf: templateURL),
+              let template = try? JSONDecoder().decode(Song.self, from: data) else { return fresh }
+        var song = template.asTemplate()   // fresh IDs again, so songs never share anything
+        song.id = UUID()
+        song.name = fresh.name
+        return song
+    }
+
     static func load(_ project: URL) throws -> Song {
         let data = try Data(contentsOf: songFile(project))
         return try JSONDecoder().decode(Song.self, from: data)

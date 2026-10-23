@@ -113,6 +113,19 @@ final class Session {
     private(set) var inputChannelCount = 0
     private(set) var sampleRate: Double = 48000
     private(set) var midiSources: [String] = []
+    /// MIDI outputs for external instruments (refreshed when MIDI devices come and go).
+    private(set) var midiDestinations: [MIDIDestination] = MIDIOutput.destinations()
+
+    /// Make a MIDI track play outboard gear (nil goes back to its instrument).
+    func setExternal(_ ext: ExternalMIDI?, on track: UUID) {
+        if let old = song.tracks.first(where: { $0.id == track })?.external {
+            MIDIOutput.shared.silence(device: old.deviceID, channel: old.channel)
+        }
+        updateTrack(track) { t in
+            t.external = ext
+            if ext != nil { t.instrument = nil }
+        }
+    }
     private(set) var micDenied = false
     /// Master switch for the audio input. Off means the mic is never opened.
     var inputEnabled = Prefs.inputEnabled {
@@ -165,11 +178,14 @@ final class Session {
     /// Where notes go when no MIDI track is armed: the selected MIDI track, else the first one.
     /// Read from the MIDI thread under midiLock.
     @ObservationIgnored private var fallbackMIDI: UUID?
+    /// MIDI tracks playing outboard gear (read from the MIDI thread under midiLock).
+    @ObservationIgnored private var externalMIDI: [UUID: ExternalMIDI] = [:]
 
     private func updateSelectedMIDI() {
         let midiTracks = song.tracks.filter { $0.kind == .midi }
         let id = (midiTracks.first { $0.id == selectedTrackID } ?? midiTracks.first)?.id
-        midiLock.lock(); fallbackMIDI = id; midiLock.unlock()
+        let externals = Dictionary(uniqueKeysWithValues: midiTracks.compactMap { t in t.external.map { (t.id, $0) } })
+        midiLock.lock(); fallbackMIDI = id; externalMIDI = externals; midiLock.unlock()
     }
 
     /// Tracks that live MIDI (hardware or KEYS) plays right now.
@@ -230,6 +246,7 @@ final class Session {
             self.pluginRevision += 1
         }
         armedMIDI = song.tracks.filter { $0.kind == .midi && $0.armed }.map(\.id)
+        updateSelectedMIDI()   // which MIDI tracks play outboard gear, before any note arrives
         rebuildEngine()
         startMIDI()
         loadWaveforms()
@@ -392,7 +409,10 @@ final class Session {
 
     private func startMIDI() {
         midi.sourcesChanged = { [weak self] in
-            DispatchQueue.main.async { self?.midiSources = self?.midi.sourceNames ?? [] }
+            DispatchQueue.main.async {
+                self?.midiSources = self?.midi.sourceNames ?? []
+                self?.midiDestinations = MIDIOutput.destinations()
+            }
         }
         midi.onEvent = { [weak self] status, d1, d2, ts in
             self?.handleMIDI(status, d1, d2, ts)
@@ -407,9 +427,17 @@ final class Session {
         guard kind == 0x80 || kind == 0x90 || kind == 0xB0 || kind == 0xE0 else { return }
         midiLock.lock()
         let targets = armedMIDI.isEmpty ? (fallbackMIDI.map { [$0] } ?? []) : armedMIDI
+        let externals = externalMIDI
         if midiRecording { midiEvents.append((status, d1, d2, ts)) }
         midiLock.unlock()
-        for t in targets { audio.sendMIDI(track: t, status: status, data1: d1, data2: d2) }
+        for t in targets {
+            if let ext = externals[t] {
+                // Outboard gear: straight out to the device, now.
+                MIDIOutput.shared.send(status, d1, d2, to: ext.deviceID, channel: ext.channel)
+            } else {
+                audio.sendMIDI(track: t, status: status, data1: d1, data2: d2)
+            }
+        }
     }
 
     // MARK: - Musical typing (computer keyboard as MIDI)
@@ -561,6 +589,26 @@ final class Session {
         do { try ProjectStore.save(copy, to: projectURL) } catch { message = "Save failed: \(error.localizedDescription)" }
     }
 
+    // MARK: - New-song default
+
+    /// Save this song's setup (with plugins' current settings) as the start for new songs.
+    func saveAsNewSongDefault() {
+        saveNow()   // captures plugin states
+        var copy = song
+        for i in copy.tracks.indices {
+            for j in copy.tracks[i].inserts.indices {
+                if let d = pluginStates[copy.tracks[i].inserts[j].id] { copy.tracks[i].inserts[j].state = d }
+            }
+            if let id = copy.tracks[i].instrument?.id, let d = pluginStates[id] { copy.tracks[i].instrument?.state = d }
+        }
+        do {
+            try ProjectStore.saveTemplate(copy)
+            message = "Saved as the default for new songs: \(copy.tracks.count) track\(copy.tracks.count == 1 ? "" : "s"), with their instruments, plugins and settings."
+        } catch {
+            message = "Couldn't save the default: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: - Plugins
 
     func addInsert(_ info: PluginInfo, to track: UUID) {
@@ -587,7 +635,10 @@ final class Session {
 
     /// nil switches back to the built-in General MIDI sounds.
     func setInstrument(_ info: PluginInfo?, on track: UUID) {
-        updateTrack(track) { $0.instrument = info?.makeSlot() }
+        updateTrack(track) { t in
+            t.instrument = info?.makeSlot()
+            if info != nil { t.external = nil }
+        }
     }
 
     func openEditor(_ slot: PluginSlot, track: Track) {

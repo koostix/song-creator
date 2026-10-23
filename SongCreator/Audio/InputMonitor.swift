@@ -56,9 +56,13 @@ final class MonitorReader: @unchecked Sendable {
     let enabled = Atomic<Bool>(false)
     private var readPos = -1
 
-    init(ring: InputRing, firstChannel: Int) {
+    /// Feed one input channel to every output channel (a mono source into a stereo strip).
+    let mono: Bool
+
+    init(ring: InputRing, firstChannel: Int, mono: Bool = false) {
         self.ring = ring
         self.firstChannel = firstChannel
+        self.mono = mono
     }
 
     /// Realtime render for an AVAudioSourceNode.
@@ -83,7 +87,7 @@ final class MonitorReader: @unchecked Sendable {
         }
         for (c, buf) in list.enumerated() {
             guard let d = buf.mData?.assumingMemoryBound(to: Float.self) else { continue }
-            ring.read(channel: firstChannel + c, from: readPos, frames: frames, into: d)
+            ring.read(channel: firstChannel + (mono ? 0 : c), from: readPos, frames: frames, into: d)
         }
         readPos += frames
         return noErr

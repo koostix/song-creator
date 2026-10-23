@@ -217,7 +217,13 @@ struct InsertSlots: View {
         VStack(spacing: 2) {
             // Fixed height in every strip so EQ, knobs and faders line up across the mixer.
             if track.kind == .midi {
-                if let inst = track.instrument {
+                if let ext = track.external {
+                    PluginRow(name: "⇄ \(ext.deviceName) ch\(ext.channel)", status: nil,
+                              onOpen: {},
+                              onRemove: { session.setExternal(nil, on: track.id) },
+                              removeHelp: "Stop using the external MIDI device")
+                        .help("Plays outboard gear over MIDI\(ext.audioReturn ? ", heard back through this strip" : "")")
+                } else if let inst = track.instrument {
                     PluginRow(name: inst.name, status: session.pluginStatus(inst),
                               onOpen: { session.openEditor(inst, track: track) },
                               onRemove: { session.setInstrument(nil, on: track.id) },

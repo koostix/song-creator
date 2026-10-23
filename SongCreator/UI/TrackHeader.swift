@@ -133,6 +133,7 @@ struct TrackHeader: View {
             Section("Built-in sounds") {
                 ForEach(GMPrograms.list, id: \.0) { p in
                     Button(p.1) {
+                        if track.external != nil { session.setExternal(nil, on: track.id) }
                         session.updateTrack(track.id) { $0.program = p.0; $0.instrument = nil }
                     }
                 }
@@ -141,23 +142,85 @@ struct TrackHeader: View {
                 ForEach(PluginCatalog.grouped(PluginCatalog.instruments), id: \.0) { group in
                     Menu(group.0) {
                         ForEach(group.1) { info in
-                            Button(info.name) { session.setInstrument(info, on: track.id) }
+                            Button(info.name) {
+                                if track.external != nil { session.setExternal(nil, on: track.id) }
+                                session.setInstrument(info, on: track.id)
+                            }
                         }
                     }
                 }
+            }
+            Section("External MIDI device") {
+                if session.midiDestinations.isEmpty {
+                    Text("No MIDI outputs connected")
+                }
+                ForEach(session.midiDestinations) { dest in
+                    Menu(dest.name) {
+                        ForEach(1...16, id: \.self) { ch in
+                            Button("Channel \(ch)") {
+                                var ext = ExternalMIDI(deviceID: dest.id, deviceName: dest.name, channel: ch)
+                                if let old = track.external { ext.audioReturn = old.audioReturn; ext.latencyMs = old.latencyMs }
+                                session.setExternal(ext, on: track.id)
+                            }
+                        }
+                    }
+                }
+            }
+            if let ext = track.external {
+                Divider()
+                audioReturnMenu(ext)
+                Menu("Delay compensation (\(Int(ext.latencyMs)) ms)") {
+                    ForEach([0, 3, 5, 10, 20, 30, 50], id: \.self) { ms in
+                        Button("\(ms) ms") { session.updateTrack(track.id) { $0.external?.latencyMs = Double(ms) } }
+                    }
+                }
+                Button("Stop using \(ext.deviceName)") { session.setExternal(nil, on: track.id) }
             }
             if let slot = track.instrument {
                 Divider()
                 Button("Open \(slot.name)…") { session.openEditor(slot, track: track) }
             }
         } label: {
-            Text(track.instrument?.name ?? GMPrograms.name(track.program))
+            Text(instrumentLabel)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(track.instrument.flatMap { session.pluginStatus($0) } != nil ? Color.orange : Theme.text)
+                .foregroundStyle(track.instrument.flatMap { session.pluginStatus($0) } != nil ? Color.orange
+                                 : track.external != nil ? Theme.accent : Theme.text)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help(track.instrument.flatMap { session.pluginStatus($0) } ?? "Instrument for this track")
+        .help(track.external.map { "Plays \($0.deviceName) on MIDI channel \($0.channel)" }
+              ?? track.instrument.flatMap { session.pluginStatus($0) } ?? "Instrument for this track")
+    }
+
+    private var instrumentLabel: String {
+        if let ext = track.external { return "⇄ \(ext.deviceName) ch\(ext.channel)" }
+        return track.instrument?.name ?? GMPrograms.name(track.program)
+    }
+
+    /// Which interface input the outboard gear comes back on, heard through this track's strip.
+    private func audioReturnMenu(_ ext: ExternalMIDI) -> some View {
+        let n = max(1, session.inputChannelCount)
+        let current = !ext.audioReturn ? "off"
+            : track.channels == 2 ? "In \(track.inputChannel + 1)-\(track.inputChannel + 2)" : "In \(track.inputChannel + 1)"
+        return Menu("Audio return (\(current))") {
+            Button("Off") { session.updateTrack(track.id) { $0.external?.audioReturn = false } }
+            Section("Mono") {
+                ForEach(0..<n, id: \.self) { c in
+                    Button("Input \(c + 1)") {
+                        session.updateTrack(track.id) { $0.external?.audioReturn = true; $0.channels = 1; $0.inputChannel = c }
+                    }
+                }
+            }
+            if n >= 2 {
+                Section("Stereo") {
+                    ForEach(Array(stride(from: 0, to: n - 1, by: 2)), id: \.self) { c in
+                        Button("Inputs \(c + 1)-\(c + 2)") {
+                            session.updateTrack(track.id) { $0.external?.audioReturn = true; $0.channels = 2; $0.inputChannel = c }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -173,7 +236,13 @@ struct FXMenu: View {
         Menu {
             if track.kind == .midi {
                 Section("Instrument") {
-                    if let slot = track.instrument {
+                    if let ext = track.external {
+                        Menu("External: \(ext.deviceName) ch\(ext.channel)") {
+                            instrumentChoices
+                            Divider()
+                            Button("Stop using \(ext.deviceName)") { session.setExternal(nil, on: track.id) }
+                        }
+                    } else if let slot = track.instrument {
                         Menu(label(slot)) {
                             Button("Open Editor") { session.openEditor(slot, track: track) }
                             instrumentChoices
