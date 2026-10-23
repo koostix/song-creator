@@ -71,7 +71,7 @@ final class Transport {
     /// Current song position, as heard (compensated for output latency).
     func currentPosition() -> Double? {
         guard let t = timing else { return nil }
-        let outLatency = audio.engine.outputNode.presentationLatency
+        let outLatency = audio.outputLatency
         let playerTime = HostTime.seconds(HostTime.now &- min(HostTime.now, t.anchorHost)) - outLatency
         guard HostTime.now >= t.anchorHost else { return t.map.songTime(atPlayerTime: 0) }
         return t.map.songTime(atPlayerTime: max(0, playerTime))
@@ -86,15 +86,14 @@ final class Transport {
         return queue.sync { () -> UInt64 in
             prepare(req)
             let anchor = HostTime.now + HostTime.ticks(0.12)
-            if let last = audio.engine.outputNode.lastRenderTime, last.isSampleTimeValid, last.isHostTimeValid {
-                let dt = HostTime.seconds(anchor) - HostTime.seconds(last.hostTime)
-                midiBase = last.sampleTime + Int64((dt * audio.sampleRate).rounded())
-            } else {
-                midiBase = nil
-            }
+            // The render sample that plays at the anchor: MIDI is scheduled against it, and with the app's own
+            // hardware connection (whose engine times carry no host time) so are the players.
+            midiBase = audio.renderSample(atHost: anchor)
             fill(throughPlayerFrame: Int64(lookahead * audio.sampleRate))
 
-            let when = AVAudioTime(hostTime: anchor)
+            let when = audio.usesOwnIO
+                ? AVAudioTime(sampleTime: midiBase ?? 0, atRate: audio.sampleRate)
+                : AVAudioTime(hostTime: anchor)
             for n in audio.tracks.values { n.player?.play(at: when) }
             audio.clickPlayer.play(at: when)
 

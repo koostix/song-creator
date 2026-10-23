@@ -122,6 +122,20 @@ final class AudioEngine {
     // Live input for per-track monitoring.
     private var inputRing: InputRing?
     private var inputSink: AVAudioSinkNode?
+    private var liveInput = false
+    /// The input format we set on the engine with our own connection. The input node may still report the
+    /// system default device's format, which mustn't be used for taps or connections.
+    private var manualInputFormat: AVAudioFormat?
+
+    /// The format audio arrives in from the input (what taps and connections on the input node must use).
+    var inputFormat: AVAudioFormat? {
+        guard hasInput else { return nil }
+        return manualInputFormat ?? engine.inputNode.outputFormat(forBus: 0)
+    }
+
+    // The app's own hardware connection when specific devices are chosen.
+    private var io: HALIO?
+    private var ioRunning = false
 
     // Audio Unit plugins, keyed by slot id. They outlive engine rebuilds.
     private(set) var units: [UUID: AVAudioUnit] = [:]
@@ -150,6 +164,9 @@ final class AudioEngine {
     /// Build a fresh engine graph, optionally on specific devices.
     func build(song: Song, inputDevice: AudioDeviceID?, outputDevice: AudioDeviceID?, inputEnabled: Bool = true,
                bufferFrames: Int? = nil) {
+        io?.stop()
+        io = nil
+        ioRunning = false
         engine.stop()
         // Nothing is carried into the new engine: the old one may still be alive (a configuration-change
         // notification holds it), and its nodes and audio units belong to it. Plugins are reloaded into the
@@ -172,6 +189,8 @@ final class AudioEngine {
         lastReverbRoom = nil
         inputRing = nil
         inputSink = nil
+        liveInput = false
+        manualInputFormat = nil
 
         destroyAggregate()
         inputChannelOffset = 0
@@ -201,6 +220,10 @@ final class AudioEngine {
         // Recording needs input and output at the same rate. If they differ, leave the input closed:
         // opening a Bluetooth headset's mic (e.g. 16 kHz) drops its output to 16 kHz call quality too.
         if hasInput, let inID, let outID = outputDevice ?? AudioDevices.defaultDevice(input: false) {
+            // Follow the output's rate when the input can run at it (built-in mics, interfaces).
+            if inID != outID, AudioDevices.sampleRate(inID) != AudioDevices.sampleRate(outID) {
+                AudioDevices.setSampleRate(inID, AudioDevices.sampleRate(outID))
+            }
             let inRate = AudioDevices.sampleRate(inID), outRate = AudioDevices.sampleRate(outID)
             if inRate > 0, outRate > 0, inRate != outRate {
                 hasInput = false
@@ -209,26 +232,36 @@ final class AudioEngine {
                     + "Playback, KEYS and MIDI still work. To record audio, pick another input in Settings (⌘,)."
             }
         }
-        // Point the engine at the chosen devices. AVAudioEngine drives input and output through one
-        // hardware unit, so two separate devices (e.g. MacBook mic + speakers) must be joined into an
-        // aggregate first; setting them one by one leaves the engine unable to start.
+        // Chosen devices get the app's own hardware connection (HALIO): AVAudioEngine's built-in I/O follows
+        // the system default and overrides a device set on it. Separate input and output devices are joined
+        // into a private aggregate first. "System default" keeps AVAudioEngine's own I/O.
         if inputDevice != nil || outputDevice != nil, let outID = outputDeviceID {
+            var ioDevice = outID
             if hasInput, let inID, inID != outID {
                 if let agg = AudioDevices.makeAggregate(output: outID, input: inID) {
                     aggregateID = agg
+                    ioDevice = agg
                     inputChannelOffset = AudioDevices.inputChannels(outID)   // the output device's inputs come first
-                    AudioDevices.setDevice(agg, on: engine.outputNode)
-                    if let bufferFrames { AudioDevices.setBufferSize(agg, frames: bufferFrames) }
                 } else {
                     hasInput = false
                     inputProblem = "Couldn't combine \(AudioDevices.name(inID) ?? "the input") with \(AudioDevices.name(outID) ?? "the output"). Try System default in Settings."
-                    AudioDevices.setDevice(outID, on: engine.outputNode)
                 }
+            }
+            if let bufferFrames { AudioDevices.setBufferSize(ioDevice, frames: bufferFrames) }
+            let inChannels = hasInput ? AudioDevices.inputChannels(ioDevice) : 0
+            if hasInput && inChannels == 0 {
+                hasInput = false
+                inputProblem = "The audio input isn't available right now. Check the device, or pick another input in Settings."
+            }
+            let rate = AudioDevices.sampleRate(ioDevice)
+            if let hal = HALIO(device: ioDevice, sampleRate: rate > 0 ? rate : 48000, inputChannels: inChannels) {
+                io = hal
             } else {
-                AudioDevices.setDevice(outID, on: engine.outputNode)
+                hasInput = false
+                inputProblem = "Couldn't open \(AudioDevices.name(outID) ?? "the chosen device"). Pick System default in Settings."
             }
         }
-        if hasInput {
+        if io == nil, hasInput {
             let f = engine.inputNode.inputFormat(forBus: 0)
             if f.channelCount == 0 || f.sampleRate == 0 {
                 hasInput = false
@@ -236,10 +269,31 @@ final class AudioEngine {
             }
         }
 
-        sampleRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        if sampleRate <= 0 { sampleRate = 48000 }
+        if let hal = io {
+            sampleRate = hal.sampleRate
+        } else {
+            sampleRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
+            if sampleRate <= 0 { sampleRate = 48000 }
+        }
         stereo = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)
         clickFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)
+
+        // With our own connection, the engine renders when the hardware asks (realtime manual rendering).
+        if let hal = io {
+            do {
+                try engine.enableManualRenderingMode(.realtime, format: stereo, maximumFrameCount: hal.maxFrames)
+                if hal.inputChannels > 0,
+                   let inFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: AVAudioChannelCount(hal.inputChannels)) {
+                    _ = engine.inputNode.setManualRenderingInputPCMFormat(inFormat) { _ in hal.inputBufferList }
+                    manualInputFormat = inFormat
+                }
+                hal.render = engine.manualRenderingBlock
+            } catch {
+                io = nil
+                hasInput = false
+                inputProblem = "Couldn't drive the chosen devices (\(error.localizedDescription)). Pick System default in Settings."
+            }
+        }
 
         for node in [masterMixer, limiter, reverbBus, reverb, delayBus, delay, clickPlayer] as [AVAudioNode] {
             engine.attach(node)
@@ -268,12 +322,75 @@ final class AudioEngine {
             engine.prepare()
             try engine.start()
         }
+        if let io, !ioRunning {
+            let status = io.start()
+            guard status == noErr else {
+                throw NSError(domain: NSOSStatusErrorDomain, code: Int(status),
+                              userInfo: [NSLocalizedDescriptionKey: "The audio device wouldn't start (Core Audio error \(status))."])
+            }
+            ioRunning = true
+            // Wait (briefly) for the first hardware cycle so timing conversions have a reference.
+            let deadline = Date().addingTimeInterval(0.5)
+            while io.lastHost.load(ordering: .acquiring) == 0 && Date() < deadline { usleep(2_000) }
+        }
+    }
+
+    deinit {
+        // Stop our hardware connection before anything else is released: its callback renders the engine.
+        io?.stop()
+        io = nil
+        destroyAggregate()
+    }
+
+    /// Stop everything (the hardware connection first, then the engine).
+    func shutdown() {
+        io?.stop()
+        ioRunning = false
+        engine.stop()
+    }
+
+    /// Engine sample time of the latest hardware cycle (own connection only; for diagnostics).
+    var lastRenderedSample: Int64 { io?.lastSample.load(ordering: .acquiring) ?? 0 }
+
+    /// Whether the app drives the hardware itself (chosen devices) instead of AVAudioEngine's own I/O.
+    var usesOwnIO: Bool { io != nil }
+
+    /// The engine render sample time at host time `h`, for scheduling against the hardware clock.
+    func renderSample(atHost h: UInt64) -> Int64? {
+        if let io { return io.sample(atHost: h) }
+        guard let last = engine.outputNode.lastRenderTime, last.isSampleTimeValid, last.isHostTimeValid else { return nil }
+        let dt = HostTime.seconds(h) - HostTime.seconds(last.hostTime)
+        return last.sampleTime + Int64((dt * sampleRate).rounded())
+    }
+
+    /// Host time of an engine render sample (only needed with our own connection, whose engine times carry no host time).
+    func hostTime(atRenderSample s: Int64) -> UInt64? { io?.hostTime(atSample: s) }
+
+    /// Time from rendering to hearing.
+    var outputLatency: Double {
+        if let io { return AudioDevices.latency(io.device, input: false) }
+        return engine.outputNode.presentationLatency
+    }
+
+    /// Time from sound reaching the input to it arriving in the app.
+    var inputLatency: Double {
+        guard hasInput else { return 0 }
+        if let io { return AudioDevices.latency(io.device, input: true) }
+        return engine.inputNode.presentationLatency
     }
 
     // MARK: - Live input
 
     private func attachInputSink() {
         guard hasInput else { return }
+        if let hal = io {
+            // Our own connection already has each cycle's input: feed the monitoring ring from it directly.
+            let ring = InputRing(channels: hal.inputChannels)
+            hal.onInput = { abl, frames, sample in ring.write(abl, frames: frames, atSample: sample) }
+            inputRing = ring
+            liveInput = true
+            return
+        }
         let format = engine.inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate == sampleRate else { return }
         let ring = InputRing(channels: Int(format.channelCount))
@@ -285,6 +402,7 @@ final class AudioEngine {
         engine.connect(engine.inputNode, to: sink, format: format)
         inputRing = ring
         inputSink = sink
+        liveInput = true
     }
 
     /// Switch to faster-than-realtime offline rendering. Live input can't be pulled offline: once the
@@ -292,11 +410,19 @@ final class AudioEngine {
     /// data comes out silent, so the input is fed silence and live monitoring is disconnected.
     func enableOfflineRendering(maxFrames: AVAudioFrameCount = 4096) throws {
         detachInputSink()
+        io?.stop()          // waits until no hardware callback is running
+        ioRunning = false
         engine.stop()
+        let wasRealtimeManual = engine.isInManualRenderingMode
+        if wasRealtimeManual { engine.disableManualRenderingMode() }
         try engine.enableManualRenderingMode(.offline, format: stereo, maximumFrameCount: maxFrames)
         if hasInput {
-            let silence = AVAudioPCMBuffer(pcmFormat: stereo, frameCapacity: maxFrames)!
-            _ = engine.inputNode.setManualRenderingInputPCMFormat(stereo) { frames in
+            // Keep the input's current format (mono mic, multichannel interface…): anything attached to it,
+            // like the recorder's tap, stays valid.
+            let current = inputFormat ?? stereo!
+            let format = current.channelCount > 0 && current.sampleRate == sampleRate ? current : stereo!
+            let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: maxFrames)!
+            _ = engine.inputNode.setManualRenderingInputPCMFormat(format) { frames in
                 silence.frameLength = min(frames, maxFrames)
                 for buf in UnsafeMutableAudioBufferListPointer(silence.mutableAudioBufferList) {
                     if let d = buf.mData { memset(d, 0, Int(buf.mDataByteSize)) }
@@ -304,10 +430,25 @@ final class AudioEngine {
                 return UnsafePointer(silence.audioBufferList)
             }
         }
+        // Leaving realtime manual mode briefly re-attaches the engine to the system default hardware, and it
+        // then stops itself once (a configuration change). Start it and wait until it stays running, so
+        // offline renders don't fail with "not running".
+        if wasRealtimeManual {
+            try engine.start()
+            var stable = 0
+            let deadline = Date().addingTimeInterval(1.5)
+            while stable < 6 && Date() < deadline {
+                usleep(20_000)
+                if engine.isRunning { stable += 1 } else { stable = 0; try engine.start() }
+            }
+        }
     }
 
     /// Offline rendering can't pull live input; call before entering manual rendering mode.
     func detachInputSink() {
+        io?.onInput = nil
+        liveInput = false
+        for n in tracks.values { n.monitorReader?.enabled.store(false, ordering: .relaxed) }
         guard let sink = inputSink else { return }
         engine.disconnectNodeInput(sink)
         engine.detach(sink)
@@ -461,7 +602,9 @@ final class AudioEngine {
     func load(_ slot: PluginSlot) {
         guard units[slot.id] == nil, !loading.contains(slot.id), pluginErrors[slot.id] == nil else { return }
         loading.insert(slot.id)
-        AVAudioUnit.instantiate(with: slot.description, options: []) { [weak self] unit, error in
+        // Out of process by default: a plugin that crashes then takes down only itself, not the app.
+        let options: AudioComponentInstantiationOptions = Prefs.pluginsOutOfProcess ? .loadOutOfProcess : []
+        AVAudioUnit.instantiate(with: slot.description, options: options) { [weak self] unit, error in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading.remove(slot.id)
@@ -541,7 +684,7 @@ final class AudioEngine {
             setLevel(track, n, anySolo: anySolo, at: automationTime)
             n.strip.destination(forMixer: reverbBus, bus: n.reverbBus)?.volume = Float(s.reverbSend)
             n.strip.destination(forMixer: delayBus, bus: n.delayBus)?.volume = Float(s.delaySend)
-            n.monitorReader?.enabled.store(track.monitor && inputSink != nil && !monitorMuted, ordering: .relaxed)
+            n.monitorReader?.enabled.store(track.monitor && liveInput && !monitorMuted, ordering: .relaxed)
 
             n.eq.bypass = !s.eqOn && !s.hpfOn
             n.eq.bands[0].bypass = !s.hpfOn
@@ -588,7 +731,11 @@ final class AudioEngine {
         clickPlayer.volume = Float(song.clickVolume)
     }
 
-    var canMonitorInput: Bool { inputSink != nil }
+    var canMonitorInput: Bool { liveInput }
+
+    /// With our own connection, the recorder reads the input from here (the engine never pulls its input
+    /// node, so a tap on it would get nothing).
+    var ownInputRing: InputRing? { io != nil ? inputRing : nil }
 
     // MARK: - MIDI to instruments
 

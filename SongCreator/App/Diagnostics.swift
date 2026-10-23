@@ -63,7 +63,9 @@ enum SmokeTest {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--smoketest"), i + 1 < args.count else { return }
         let out = URL(fileURLWithPath: args[i + 1])
-        DispatchQueue.main.async { run(out) }
+        // From a run-loop timer, not a main-queue block: work that finishes on the main queue
+        // (plugin loading, engine callbacks) can't run while a main-queue block is still running.
+        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { _ in run(out) }
     }
 
     private static func spin(_ seconds: Double) {
@@ -159,9 +161,28 @@ enum SmokeTest {
         for (label, inUID, outUID, enabled, buffer) in setups {
             lines.append(label)
             Prefs.inputUID = inUID; Prefs.outputUID = outUID; Prefs.inputEnabled = enabled; Prefs.bufferFrames = buffer
+            // A default input that can't run at the default output's rate (a Bluetooth headset mic) is refused on purpose.
+            var expect = enabled
+            if inUID == nil, let din = AudioDevices.defaultDevice(input: true), let dout = AudioDevices.defaultDevice(input: false),
+               din != dout || AudioDevices.transportType(din) == kAudioDeviceTransportTypeBluetooth,
+               !AudioDevices.supports(din, rate: AudioDevices.sampleRate(dout)) {
+                expect = false
+                lines.append("  (default input \(AudioDevices.name(din) ?? "?") can't run at the output's rate: recording should be refused)")
+            }
             let s = newSession(label)
-            lines.append("  engine running=\(s.audio.engine.isRunning) input=\(s.audio.hasInput) rate=\(s.sampleRate) message=\(s.message ?? "none")")
-            recordPass(s, label, expectAudio: enabled)
+            lines.append("  engine running=\(s.audio.engine.isRunning) ownIO=\(s.audio.usesOwnIO) input=\(s.audio.hasInput) rate=\(s.sampleRate) message=\(s.message ?? "none")")
+            recordPass(s, label, expectAudio: expect)
+            if expect, label == "mic + speakers" {
+                // Mixdown with chosen devices: the engine leaves realtime mode for offline rendering.
+                var done: URL?
+                var finished = false
+                s.export(format: .wav16, range: TimeRange(start: 0, end: 2), stems: false) { url in done = url; finished = true }
+                let deadline = Date().addingTimeInterval(20)
+                while !finished && Date() < deadline { spin(0.2) }
+                let p = done.map { peak($0) } ?? (frames: 0, peak: 0)
+                check(done != nil && p.peak > 0, "mixdown with chosen devices has sound (peak \(String(format: "%.4f", p.peak)))")
+                recordPass(s, "recording again after the mixdown")
+            }
             s.close()
         }
 
@@ -181,14 +202,16 @@ enum SmokeTest {
             AudioDevices.setSampleRate(spk, 48000)
             AudioDevices.setSampleRate(mic, 48000)
             let r = newSession("rate song")
-            recordPass(r, "record at 48 kHz")
+            recordPass(r, "record a song")
             let url = r.projectURL
+            let recordedRate = r.song.sampleRate
             r.close()
-            AudioDevices.setSampleRate(spk, 96000)
+            let otherRate: Double = recordedRate == 96000 ? 48000 : 96000
+            AudioDevices.setSampleRate(spk, otherRate)
             let reopened = Session(projectURL: url, song: try! ProjectStore.load(url))
             spin(0.6)
-            check(reopened.sampleRate == 48000 && AudioDevices.sampleRate(spk) == 48000 && reopened.message == nil,
-                  "reopening a 48 kHz song switches the speakers back from 96 kHz (\(reopened.message ?? "no warning"))")
+            check(reopened.sampleRate == recordedRate && AudioDevices.sampleRate(spk) == recordedRate && reopened.message == nil,
+                  "reopening a \(Int(recordedRate)) Hz song switches the speakers back from \(Int(otherRate)) Hz (\(reopened.message ?? "no warning"))")
             reopened.play(from: 0)
             spin(0.6)
             check(reopened.isPlaying && reopened.playhead.position > 0.1, "its takes play")
@@ -222,6 +245,97 @@ enum SmokeTest {
         lines.append("restored: mic \(mic.map(AudioDevices.sampleRate) ?? 0), speakers \(spk.map(AudioDevices.sampleRate) ?? 0), "
                      + "buffer \(Prefs.bufferFrames), devices \(Prefs.inputUID ?? "default") / \(Prefs.outputUID ?? "default")")
         lines.append(failures == 0 ? "SMOKE PASS" : "SMOKE FAIL (\(failures))")
+        try? lines.joined(separator: "\n").appending("\n").write(to: out, atomically: true, encoding: .utf8)
+        exit(failures == 0 ? 0 : 1)
+    }
+}
+
+/// `open -a "Song Creator" --args --plugintest <file>`: load a sample of your installed Audio Units
+/// (instruments and effects from other makers), open each editor, then bypass and remove one through
+/// a song, and write a report.
+enum PluginTest {
+    static func runIfRequested() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--plugintest"), i + 1 < args.count else { return }
+        let out = URL(fileURLWithPath: args[i + 1])
+        // From a run-loop timer, not a main-queue block: work that finishes on the main queue
+        // (plugin loading, engine callbacks) can't run while a main-queue block is still running.
+        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { _ in run(out) }
+    }
+
+    private static func spin(_ seconds: Double, until done: () -> Bool = { false }) {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end && !done() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+    }
+
+    static func run(_ out: URL) {
+        var lines: [String] = []
+        var failures = 0
+        func check(_ ok: Bool, _ what: String) {
+            lines.append((ok ? "  ok   " : "  FAIL ") + what)
+            if !ok { failures += 1 }
+        }
+        let thirdParty = { (list: [PluginInfo]) in list.filter { $0.manufacturerCode != kAudioUnitManufacturer_Apple } }
+        let instruments = thirdParty(PluginCatalog.instruments)
+        let effects = thirdParty(PluginCatalog.effects)
+        lines.append("installed: \(instruments.count) instruments, \(effects.count) effects from other makers")
+        let tal = instruments.filter { $0.name.localizedCaseInsensitiveContains("U-No") }
+        let sample = Array((tal + instruments).prefix(3)) + Array(effects.prefix(5))
+
+        let audio = AudioEngine()
+        var song = Song.newIdea()
+        audio.build(song: song, inputDevice: nil, outputDevice: nil, inputEnabled: false)
+        for info in sample {
+            let slot = info.makeSlot()
+            var track = Track(name: info.name, kind: info.type == kAudioUnitType_MusicDevice ? .midi : .audio, channels: 2)
+            if track.kind == .midi { track.instrument = slot } else { track.inserts = [slot] }
+            song.tracks = [track]
+            audio.sync(song)
+            spin(15) { audio.unit(slot.id) != nil || audio.pluginErrors[slot.id] != nil }
+            guard let unit = audio.unit(slot.id) else {
+                check(false, "\(info.manufacturer) \(info.name): loads (\(audio.pluginErrors[slot.id] ?? "timed out"))")
+                continue
+            }
+            PluginWindows.open(unit, slot: slot.id, title: info.name)
+            spin(10) { PluginWindows.isOpen(slot.id) }
+            check(PluginWindows.isOpen(slot.id), "\(info.manufacturer) \(info.name): editor opens (\(PluginWindows.lastKind))")
+            PluginWindows.close(slot.id)
+        }
+
+        // Bypass and remove through a real song, the way the buttons do it.
+        if let fx = effects.first {
+            let root = out.deletingLastPathComponent().appendingPathComponent("plugin-test-song")
+            try? FileManager.default.removeItem(at: root)
+            var s = Song.newIdea()
+            s.name = "Plugin test"
+            let url = try! ProjectStore.create(s, in: root)
+            let saved = Prefs.inputEnabled
+            Prefs.inputEnabled = false
+            let session = Session(projectURL: url, song: s)
+            Prefs.inputEnabled = saved
+            let tid = session.song.tracks[0].id
+            session.addInsert(fx, to: tid)
+            let slot = session.song.tracks[0].inserts[0]
+            spin(15) { session.audio.unit(slot.id) != nil || session.audio.pluginErrors[slot.id] != nil }
+            session.toggleBypass(slot.id, in: tid)
+            check(session.audio.unit(slot.id)?.auAudioUnit.shouldBypassEffect == true, "\(fx.name): ⏻ bypasses it")
+            session.toggleBypass(slot.id, in: tid)
+            check(session.audio.unit(slot.id)?.auAudioUnit.shouldBypassEffect == false, "\(fx.name): ⏻ again enables it")
+            session.openEditor(session.song.tracks[0].inserts[0], track: session.song.tracks[0])
+            spin(10) { PluginWindows.isOpen(slot.id) }
+            session.removeInsert(slot.id, from: tid)
+            spin(0.5)
+            check(session.song.tracks[0].inserts.isEmpty && session.audio.unit(slot.id) == nil && !PluginWindows.isOpen(slot.id),
+                  "\(fx.name): × removes it, unloads it and closes its window")
+            session.undo()
+            spin(15) { session.audio.unit(slot.id) != nil }
+            check(session.song.tracks[0].inserts.count == 1 && session.audio.unit(slot.id) != nil, "undo brings it back")
+            session.close()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        audio.engine.stop()
+        lines.append(failures == 0 ? "PLUGIN TEST PASS" : "PLUGIN TEST FAIL (\(failures))")
         try? lines.joined(separator: "\n").appending("\n").write(to: out, atomically: true, encoding: .utf8)
         exit(failures == 0 ? 0 : 1)
     }

@@ -28,16 +28,25 @@ final class Recorder {
     private var sampleRate: Double = 48000
     private var livePeaks: [UUID: [Float]] = [:]
     private weak var meters: MeterStore?
+    /// With the app's own hardware connection, input buffer times carry only an engine sample time.
+    private var hostTimeForSample: ((Int64) -> UInt64?)?
     private var tunerChannel = -1
     private var tunerSamples: [Float] = []
     private(set) var inputRate: Double = 48000
 
     func installTap(on audio: AudioEngine) {
+        pullTimer?.cancel()
+        pullTimer = nil
         guard audio.hasInput else { return }
+        if let ring = audio.ownInputRing, let format = audio.inputFormat {
+            startPulling(ring, format: format, audio: audio)
+            return
+        }
         let input = audio.engine.inputNode
-        let format = input.outputFormat(forBus: 0)
+        guard let format = audio.inputFormat else { return }
         guard format.channelCount > 0, format.sampleRate > 0 else { return }
         meters = audio.meters
+        hostTimeForSample = { [weak audio] sample in audio?.hostTime(atRenderSample: sample) }
         inputRate = format.sampleRate
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, when in
@@ -56,6 +65,42 @@ final class Recorder {
     func latestTunerSamples() -> [Float] {
         lock.lock(); defer { lock.unlock() }
         return tunerSamples
+    }
+
+    // MARK: - Own hardware connection: read the input ring off the audio thread
+
+    private var pullTimer: DispatchSourceTimer?
+    private let pullQueue = DispatchQueue(label: "songcreator.recorder.pull", qos: .userInitiated)
+
+    private func startPulling(_ ring: InputRing, format: AVAudioFormat, audio: AudioEngine) {
+        meters = audio.meters
+        inputRate = format.sampleRate
+        hostTimeForSample = { [weak audio] sample in audio?.hostTime(atRenderSample: sample) }
+        var readPos = ring.written.load(ordering: .acquiring)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(ring.capacity)) else { return }
+        let t = DispatchSource.makeTimerSource(queue: pullQueue)
+        t.schedule(deadline: .now() + 0.02, repeating: 0.02, leeway: .milliseconds(5))
+        t.setEventHandler { [weak self] in
+            guard let self, let data = buf.floatChannelData else { return }
+            let w = ring.written.load(ordering: .acquiring)
+            var available = w - readPos
+            if available > ring.capacity / 2 {          // fell far behind: skip ahead rather than read overwritten audio
+                readPos = w - ring.capacity / 4
+                available = w - readPos
+            }
+            guard available > 0 else { return }
+            let n = min(available, Int(buf.frameCapacity))
+            for c in 0..<Int(format.channelCount) {
+                ring.read(channel: c, from: readPos, frames: n, into: data[c])
+            }
+            buf.frameLength = AVAudioFrameCount(n)
+            let base = ring.baseSample.load(ordering: .acquiring)
+            let when = AVAudioTime(sampleTime: max(0, base) + Int64(readPos), atRate: format.sampleRate)
+            readPos += n
+            self.process(buf, when)
+        }
+        t.resume()
+        pullTimer = t
     }
 
     func begin(targets: [Target], sampleRate: Double) {
@@ -103,7 +148,13 @@ final class Recorder {
         }
         guard !targets.isEmpty else { return }
         if firstHost == nil {
-            firstHost = when.isHostTimeValid ? when.hostTime : HostTime.now
+            if when.isHostTimeValid {
+                firstHost = when.hostTime
+            } else if when.isSampleTimeValid, let h = hostTimeForSample?(when.sampleTime) {
+                firstHost = h
+            } else {
+                firstHost = HostTime.now
+            }
         }
         for t in targets {
             guard let out = AVAudioPCMBuffer(pcmFormat: t.file.processingFormat, frameCapacity: AVAudioFrameCount(n)),

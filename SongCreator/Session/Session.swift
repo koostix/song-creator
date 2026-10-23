@@ -40,6 +40,11 @@ enum Prefs {
         get { defaults.object(forKey: "feedbackProtection") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "feedbackProtection") }
     }
+    /// Run Audio Units in a separate process so a crashing plugin can't take the app down.
+    static var pluginsOutOfProcess: Bool {
+        get { defaults.object(forKey: "pluginsOutOfProcess") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "pluginsOutOfProcess") }
+    }
     static var jamMode: Bool {
         get { defaults.bool(forKey: "jamMode") }
         set { defaults.set(newValue, forKey: "jamMode") }
@@ -123,6 +128,8 @@ final class Session {
     var monitoringMuted: Bool { feedbackProtection && onSpeakers }
     @ObservationIgnored private var speakerListener: (AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)?
     @ObservationIgnored private var deviceMessage: String?
+    @ObservationIgnored private var deviceListeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    @ObservationIgnored private var deviceListObserver: NSObjectProtocol?
     var inputUID: String? = Prefs.inputUID
     var outputUID: String? = Prefs.outputUID
 
@@ -216,6 +223,10 @@ final class Session {
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
             guard let self, (note.object as? AVAudioEngine) === self.audio.engine, self.exportProgress == nil else { return }
+            // With the app's own hardware connection the engine isn't attached to hardware; its configuration
+            // notices mean nothing, and rebuilding would pull the engine out from under playback or recording.
+            // Device changes are watched directly instead (see watchDevices).
+            if self.audio.usesOwnIO { return }
             // Our own rebuild (device or buffer-size change) makes the new engine report a change too.
             // Rebuilding again would loop, so just restart it.
             if Date().timeIntervalSince(self.lastRebuild) < 1.5 {
@@ -226,6 +237,10 @@ final class Session {
             self.rebuildEngine()
         }
         uiTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.tickUI() }
+        deviceListObserver = NotificationCenter.default.addObserver(forName: .audioDevicesChanged, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.audio.usesOwnIO else { return }
+            self.deviceChanged()
+        }
     }
 
     func close() {
@@ -233,9 +248,11 @@ final class Session {
         uiTimer?.invalidate()
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         if let l = speakerListener { AudioDevices.removeListener(l) }
+        for l in deviceListeners { AudioDevices.removeListener(l) }
+        if let deviceListObserver { NotificationCenter.default.removeObserver(deviceListObserver) }
         saveNow()
         PluginWindows.closeAll()
-        audio.engine.stop()
+        audio.shutdown()
         audio.destroyAggregate()
     }
 
@@ -264,7 +281,7 @@ final class Session {
         do {
             try audio.start()
         } catch {
-            message = "Audio couldn't start with these devices. Pick System default in Settings (⌘,) and try again."
+            message = "Audio couldn't start with these devices (\(error.localizedDescription)). Pick System default in Settings (⌘,) and try again."
             deviceMessage = message
         }
         micDenied = audio.micDenied
@@ -273,7 +290,8 @@ final class Session {
             warning = problem   // with the input switched off on purpose, the status bar says so instead
         } else if audio.hasInput, audio.inputSampleRate != audio.sampleRate {
             warning = "Input runs at \(Int(audio.inputSampleRate)) Hz but output at \(Int(audio.sampleRate)) Hz. Set both to the same rate in Audio MIDI Setup."
-        } else if song.sampleRate > 0, song.sampleRate != audio.sampleRate {
+        } else if song.sampleRate > 0, song.sampleRate != audio.sampleRate,
+                  song.tracks.contains(where: { $0.takes.contains { $0.fileName != nil } }) {
             warning = "This song was recorded at \(Int(song.sampleRate)) Hz; your device is at \(Int(audio.sampleRate)) Hz. Switch the device to \(Int(song.sampleRate)) Hz to hear the audio."
         }
         if let warning {
@@ -281,6 +299,7 @@ final class Session {
             deviceMessage = warning
         }
         watchSpeakers()
+        watchDevices()
         updateMonitorSafety()
     }
 
@@ -305,6 +324,31 @@ final class Session {
         onSpeakers = audio.outputDeviceID.map(AudioDevices.isBuiltInSpeakers) ?? false
         audio.monitorMuted = monitoringMuted
         audio.applyParameters(song)
+    }
+
+    /// With the app's own hardware connection: rebuild when a chosen device goes away or changes rate.
+    private func watchDevices() {
+        for l in deviceListeners { AudioDevices.removeListener(l) }
+        deviceListeners = []
+        guard audio.usesOwnIO else { return }
+        let ids = [AudioDevices.device(uid: inputUID)?.id, AudioDevices.device(uid: outputUID)?.id].compactMap { $0 }
+        for id in Set(ids) {
+            deviceListeners.append(AudioDevices.addListener(id, kAudioDevicePropertyNominalSampleRate) { [weak self] in
+                self?.deviceChanged()
+            })
+        }
+        AudioDevices.startWatching()
+    }
+
+    private func deviceChanged() {
+        guard audio.usesOwnIO, !isRecording, exportProgress == nil else { return }
+        // Our own rate alignments echo here; only a device that's gone or no longer at the engine's rate matters.
+        let ids = [AudioDevices.device(uid: inputUID)?.id, AudioDevices.device(uid: outputUID)?.id]
+        let missing = [inputUID, outputUID].compactMap { $0 }.contains { AudioDevices.device(uid: $0) == nil }
+        let rateMoved = ids.compactMap { $0 }.contains { AudioDevices.sampleRate($0) != audio.sampleRate }
+        guard missing || rateMoved else { return }
+        message = "Audio device changed — reconnected."
+        rebuildEngine()
     }
 
     /// Plugging headphones into the jack can switch the built-in output's source without a device change.
@@ -674,7 +718,7 @@ final class Session {
             // Punch in on the fly.
             recStartSong = song.punchEnabled ? max(pos, song.punch.start) : pos
             let now = HostTime.seconds(HostTime.now) - HostTime.seconds(timing.anchorHost)
-            recStartPlayer = max(0, now - audio.engine.outputNode.presentationLatency)
+            recStartPlayer = max(0, now - audio.outputLatency)
             recorder.begin(targets: targets, sampleRate: audio.sampleRate)
             isRecording = true
         } else {
@@ -730,8 +774,8 @@ final class Session {
         guard let timing = transport.timing else { _ = recorder.finish(); jamLoop = nil; return }
         let map = timing.map
         let anchor = HostTime.seconds(timing.anchorHost)
-        let outLat = audio.engine.outputNode.presentationLatency
-        let inLat = audio.hasInput ? audio.engine.inputNode.presentationLatency : 0
+        let outLat = audio.outputLatency
+        let inLat = audio.inputLatency
         let offset = latencyOffsetMs / 1000
         let nowPlayer = HostTime.seconds(HostTime.now) - anchor - outLat
 
@@ -852,8 +896,8 @@ final class Session {
     func livePeaks(for trackID: UUID) -> (songStart: Double, step: Double, peaks: ArraySlice<Float>)? {
         guard isRecording, let live = recorder.live(trackID), let timing = transport.timing else { return nil }
         let anchor = HostTime.seconds(timing.anchorHost)
-        let outLat = audio.engine.outputNode.presentationLatency
-        let inLat = audio.engine.inputNode.presentationLatency
+        let outLat = audio.outputLatency
+        let inLat = audio.inputLatency
         let fileStart = HostTime.seconds(live.firstHost) - anchor - inLat - outLat - latencyOffsetMs / 1000
         let step = Double(Recorder.peakFrames) / audio.sampleRate
         let nowPlayer = fileStart + Double(live.peaks.count) * step

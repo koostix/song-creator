@@ -53,6 +53,7 @@ struct SongCreatorApp: App {
     init() {
         Diagnostics.runIfRequested()
         SmokeTest.runIfRequested()
+        PluginTest.runIfRequested()
         #if DEBUG
         SelfTest.runIfRequested()
         SelfTest.snapshotIfRequested()

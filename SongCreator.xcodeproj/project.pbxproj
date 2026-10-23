@@ -15,6 +15,7 @@
 		4839EA04E0619F9CD5212EBB /* SelfTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96A78CF3153B581EA315F83F /* SelfTest.swift */; };
 		4BBD3C94D11023AC84C784CD /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60C2E33D87353CCD3F9EBD58 /* Timeline.swift */; };
 		4FEB476D1ED884A1F46EFE86 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C42F92D298C36A0D16045A4D /* Recorder.swift */; };
+		527DB89EF6BA94F47BFFAC1B /* HALIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AF5EDFC5F4F19C5873081C4 /* HALIO.swift */; };
 		566149A8A5CD8DA25D5204C1 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DD10BD901B455AE9375359F /* Transport.swift */; };
 		62C8D6A2C711F3362FC9A130 /* Exporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16EC643B67715055C5148AF0 /* Exporter.swift */; };
 		64DFE14C7A05B6A538F0A93E /* AudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7AD962973BB7B9E79C5D9B6 /* AudioEngine.swift */; };
@@ -56,6 +57,7 @@
 		7CC6AF9EFE4826B847CA5D03 /* SongCreator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SongCreator.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		876A14DCDC35A3A3BDB37311 /* MixerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixerView.swift; sourceTree = "<group>"; };
 		96A78CF3153B581EA315F83F /* SelfTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfTest.swift; sourceTree = "<group>"; };
+		9AF5EDFC5F4F19C5873081C4 /* HALIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HALIO.swift; sourceTree = "<group>"; };
 		9DDBF59D0E229E80E5C07AF1 /* ArrangeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArrangeView.swift; sourceTree = "<group>"; };
 		AE015EC97ADA03B6A74F4B57 /* WaveformStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaveformStore.swift; sourceTree = "<group>"; };
 		AE775CD3838681742317CE31 /* SongCreatorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SongCreatorApp.swift; sourceTree = "<group>"; };
@@ -112,6 +114,7 @@
 				B7AD962973BB7B9E79C5D9B6 /* AudioEngine.swift */,
 				C581404577FFF8EC4987A54F /* ChunkRenderer.swift */,
 				16EC643B67715055C5148AF0 /* Exporter.swift */,
+				9AF5EDFC5F4F19C5873081C4 /* HALIO.swift */,
 				2DBC32091D336ACF0D818027 /* InputMonitor.swift */,
 				11741F30BB1A007171669101 /* MIDIInput.swift */,
 				B232DFF457BAD244AEA58A25 /* Plugins.swift */,
@@ -245,6 +248,7 @@
 				B7DE66E8DDD76A00E7B6C33F /* Controls.swift in Sources */,
 				44684A26F031EBF8A936C6C0 /* Diagnostics.swift in Sources */,
 				62C8D6A2C711F3362FC9A130 /* Exporter.swift in Sources */,
+				527DB89EF6BA94F47BFFAC1B /* HALIO.swift in Sources */,
 				8FBB7AFF0BEC887721F9A310 /* InputMonitor.swift in Sources */,
 				2F6D8E42B96FC9CC713E1401 /* MIDIInput.swift in Sources */,
 				88F4C4AED6C00D8E9D3D2B83 /* MainView.swift in Sources */,

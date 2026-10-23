@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage("bufferFrames") private var bufferFrames = 256
     @AppStorage("latencyOffsetMs") private var latencyMs = 0.0
     @AppStorage("returnOnStop") private var returnOnStop = true
+    @AppStorage("pluginsOutOfProcess") private var pluginsOutOfProcess = true
 
     private var session: Session? { model.session }
 
@@ -70,6 +71,12 @@ struct SettingsView: View {
                 Text("Reported device latency is already compensated. If new takes land late against the click, raise this. If they land early, lower it.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Return to start position on stop", isOn: $returnOnStop)
+            }
+
+            Section("Plugins") {
+                Toggle("Run plugins in a separate process (safer)", isOn: $pluginsOutOfProcess)
+                Text("A plugin that crashes then closes only itself, not Song Creator. Turning this off saves a little CPU. Applies to plugins loaded after you change it; reopen the song to reload all of them.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("MIDI inputs") {

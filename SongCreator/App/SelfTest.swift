@@ -381,11 +381,8 @@ enum SelfTest {
         try check(lp440 > 0.005 && lp880 < lp440 * 0.6, "insert plugin processes the audio")
         try check(mix.window(6.1, 6.8).rms > 0.002, "MIDI plays through the AU instrument")
         try check(audio.pluginState(lowpass.id) != nil, "plugin state can be saved")
-        PluginWindows.open(audio.unit(lowpass.id)!, slot: lowpass.id, title: "AULowpass — test")
-        let openDeadline = Date().addingTimeInterval(5)
-        while Date() < openDeadline, !PluginWindows.isOpen(lowpass.id) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-        try check(PluginWindows.isOpen(lowpass.id), "a loaded plugin's editor window opens")
-        PluginWindows.close(lowpass.id)
+        // Editor windows need a fully launched app (out-of-process plugin views are remote views), so they're
+        // covered by the in-app `--plugintest`, not here.
 
         // A device change mid-session: plugins reload into the new engine with their settings.
         audio.build(song: song, inputDevice: nil, outputDevice: nil)
@@ -427,6 +424,10 @@ enum SelfTest {
         try check(session.song.tracks.contains { $0.kind == .midi } && session.midiTargets.count == 1,
                   "KEYS adds a MIDI track when the song has none")
         // Typed notes must actually sound, even with an audio track selected.
+        // Mark the session busy like an export does, so a device change (other apps can switch the mic's rate)
+        // doesn't rebuild the engine mid-render.
+        session.exportProgress = 0
+        defer { session.exportProgress = nil }
         let eng = session.audio.engine
         try session.audio.enableOfflineRendering()
         try eng.start()
@@ -523,44 +524,40 @@ enum SelfTest {
         print("Explicit device choices")
         if let mic = AudioDevices.all().first(where: { $0.uid == "BuiltInMicrophoneDevice" }),
            let spk = AudioDevices.all().first(where: { $0.uid == "BuiltInSpeakerDevice" }) {
-            // The setup that broke recording: separate input and output devices chosen in Settings.
-            if let agg = AudioDevices.makeAggregate(output: spk.id, input: mic.id) {
-                let e = AVAudioEngine()
-                AudioDevices.setDevice(agg, on: e.outputNode)
-                let inFmt = e.inputNode.inputFormat(forBus: 0)
-                e.connect(e.mainMixerNode, to: e.outputNode, format: nil)
-                let player = AVAudioPlayerNode()
-                e.attach(player)
-                let fmt = AVAudioFormat(standardFormatWithSampleRate: inFmt.sampleRate > 0 ? inFmt.sampleRate : 44100, channels: 2)!
-                e.connect(player, to: e.mainMixerNode, format: fmt)
-                var started = true
-                do { e.prepare(); try e.start() } catch { started = false }
-                let silence = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 8192)!
-                silence.frameLength = 8192
-                player.scheduleBuffer(silence)
-                player.play()
-                RunLoop.main.run(until: Date().addingTimeInterval(0.4))
-                let rendered = e.outputNode.lastRenderTime?.sampleTime ?? 0
-                let outCh = e.outputNode.outputFormat(forBus: 0).channelCount
-                print("  aggregate: started=\(started) in=\(inFmt.sampleRate)/\(inFmt.channelCount) out=\(outCh) rendered=\(rendered)")
-                e.stop()
-                AudioHardwareDestroyAggregateDevice(agg)
-                try check(started && inFmt.channelCount == 1 && outCh == 2 && rendered > 0,
-                          "mic + speakers joined: engine starts, 1 in / 2 out, audio renders")
-            } else {
-                try check(false, "could create an aggregate of mic + speakers")
+            // Chosen devices must really be used, even while another device (e.g. Bluetooth) is the system default.
+            let micRate = AudioDevices.sampleRate(mic.id)
+            defer { AudioDevices.setSampleRate(mic.id, micRate) }
+            let chosen = AudioEngine()
+            chosen.build(song: Song.newIdea(), inputDevice: mic.id, outputDevice: spk.id, inputEnabled: true)
+            var chosenStarted = true
+            do { try chosen.start() } catch { chosenStarted = false }
+            let r0 = chosen.renderSample(atHost: HostTime.now) ?? 0
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+            let r1 = chosen.renderSample(atHost: HostTime.now) ?? 0
+            print("  chosen mic + speakers: ownIO=\(chosen.usesOwnIO) rate=\(chosen.sampleRate) speakers=\(AudioDevices.sampleRate(spk.id)) "
+                  + "input=\(chosen.hasInput) ch=\(chosen.inputChannelCount) advanced=\(r1 - r0) latency out \(String(format: "%.1f", chosen.outputLatency * 1000)) ms")
+            let f0 = chosen.lastRenderedSample
+            RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+            let f1 = chosen.lastRenderedSample
+            print("  rendered in 1 s: \(f1 - f0) frames (rate \(chosen.sampleRate))")
+            try check(chosenStarted && chosen.usesOwnIO && chosen.sampleRate == AudioDevices.sampleRate(spk.id) && r1 - r0 > Int64(chosen.sampleRate * 0.2),
+                      "mic + speakers chosen: runs on those devices at their rate and keeps rendering")
+            if chosen.hasInput {
+                try check(chosen.inputChannelCount == 1 && chosen.canMonitorInput, "the mic is captured (1 channel) and can be monitored")
             }
+            chosen.shutdown()
+            chosen.destroyAggregate()
             let out = AudioEngine()
             out.build(song: Song.newIdea(), inputDevice: mic.id, outputDevice: spk.id, inputEnabled: false)
             var outStarted = true
             do { try out.start() } catch { outStarted = false }
-            try check(outStarted && out.sampleRate > 0, "speakers chosen with input off: engine starts")
-            out.engine.stop()
+            try check(outStarted && out.sampleRate > 0 && out.usesOwnIO, "speakers chosen with input off: engine starts on them")
+            out.shutdown()
             out.build(song: Song.newIdea(), inputDevice: mic.id, outputDevice: spk.id, inputEnabled: true)
             var bothStarted = true
             do { try out.start() } catch { bothStarted = false }
             try check(bothStarted, "mic + speakers chosen in Settings: engine starts (\(out.inputProblem ?? "input open"))")
-            out.engine.stop()
+            out.shutdown()
             out.destroyAggregate()
         }
 

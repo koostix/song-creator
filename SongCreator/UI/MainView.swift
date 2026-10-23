@@ -15,7 +15,7 @@ struct MainView: View {
             if session.showMixer {
                 Divider().overlay(Color.black)
                 MixerView(session: session)
-                    .frame(height: 490)
+                    .frame(height: 508)
                     .transition(.move(edge: .bottom))
             }
             StatusBar(session: session)

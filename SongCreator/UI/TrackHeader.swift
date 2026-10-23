@@ -174,9 +174,14 @@ struct FXMenu: View {
             if track.kind == .midi {
                 Section("Instrument") {
                     if let slot = track.instrument {
-                        Button(label(slot)) { session.openEditor(slot, track: track) }
+                        Menu(label(slot)) {
+                            Button("Open Editor") { session.openEditor(slot, track: track) }
+                            instrumentChoices
+                            Divider()
+                            Button("Remove (use built-in sounds)") { session.setInstrument(nil, on: track.id) }
+                        }
                     } else {
-                        Text("Built-in: \(GMPrograms.name(track.program))")
+                        Menu("Built-in: \(GMPrograms.name(track.program))") { instrumentChoices }
                     }
                 }
             }
@@ -185,7 +190,16 @@ struct FXMenu: View {
                     Text("No effects yet")
                 }
                 ForEach(track.inserts) { slot in
-                    Button(label(slot)) { session.openEditor(slot, track: track) }
+                    Menu(label(slot)) {
+                        Button("Open Editor") { session.openEditor(slot, track: track) }
+                        Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: track.id) }
+                        Button("Move Up") { session.moveInsert(slot.id, in: track.id, by: -1) }
+                            .disabled(track.inserts.first?.id == slot.id)
+                        Button("Move Down") { session.moveInsert(slot.id, in: track.id, by: 1) }
+                            .disabled(track.inserts.last?.id == slot.id)
+                        Divider()
+                        Button("Remove") { session.removeInsert(slot.id, from: track.id) }
+                    }
                 }
             }
             Menu("Add Effect") {
@@ -207,6 +221,24 @@ struct FXMenu: View {
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         .help(slots.isEmpty ? "Add an Audio Unit effect" : "Open this track's plugins")
+    }
+
+    /// Swap the instrument: Audio Units by manufacturer, or a built-in sound.
+    @ViewBuilder private var instrumentChoices: some View {
+        Menu("Change Instrument") {
+            Menu("Built-in sounds") {
+                ForEach(GMPrograms.list, id: \.0) { p in
+                    Button(p.1) { session.updateTrack(track.id) { $0.program = p.0; $0.instrument = nil } }
+                }
+            }
+            ForEach(PluginCatalog.grouped(PluginCatalog.instruments), id: \.0) { group in
+                Menu(group.0) {
+                    ForEach(group.1) { info in
+                        Button(info.name) { session.setInstrument(info, on: track.id) }
+                    }
+                }
+            }
+        }
     }
 
     private func label(_ slot: PluginSlot) -> String {

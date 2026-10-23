@@ -67,8 +67,11 @@ enum PluginWindows {
                     window = makeWindow(size: size, title: title)
                     window.contentViewController = vc
                     window.setContentSize(size)
+                    lastKind = "plugin UI"
                 } else {
-                    let view = cocoaView(unit) ?? genericView(unit)
+                    let cocoa = cocoaView(unit)
+                    lastKind = cocoa != nil ? "classic UI" : "generic controls"
+                    let view = cocoa ?? genericView(unit)
                     window = makeWindow(size: view.frame.size, title: title)
                     window.contentView = view
                 }
@@ -80,6 +83,8 @@ enum PluginWindows {
     }
 
     static func isOpen(_ slot: UUID) -> Bool { windows[slot]?.isVisible ?? false }
+    /// How the last editor was shown: "plugin UI", "classic UI" or "generic controls".
+    private(set) static var lastKind = ""
 
     static func closeAll() {
         for w in windows.values { w.close() }

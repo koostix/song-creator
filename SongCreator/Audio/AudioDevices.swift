@@ -162,12 +162,40 @@ enum AudioDevices {
         return sampleRate(id) == rate
     }
 
+    /// Latency of one direction of a device in seconds: hardware + safety offset + stream + one buffer.
+    static func latency(_ id: AudioDeviceID, input: Bool) -> Double {
+        let scope = input ? kAudioDevicePropertyScopeInput : kAudioDevicePropertyScopeOutput
+        func frames(_ sel: AudioObjectPropertySelector, _ sc: AudioObjectPropertyScope) -> UInt32 {
+            var addr = AudioObjectPropertyAddress(mSelector: sel, mScope: sc, mElement: kAudioObjectPropertyElementMain)
+            var v = UInt32(0); var size = UInt32(4)
+            return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &v) == noErr ? v : 0
+        }
+        var total = frames(kAudioDevicePropertyLatency, scope) + frames(kAudioDevicePropertySafetyOffset, scope)
+            + frames(kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size >= 4 {
+            var streams = [AudioStreamID](repeating: 0, count: Int(size) / 4)
+            if AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &streams) == noErr, let first = streams.first {
+                var la = AudioObjectPropertyAddress(mSelector: kAudioStreamPropertyLatency, mScope: kAudioObjectPropertyScopeGlobal,
+                                                    mElement: kAudioObjectPropertyElementMain)
+                var v = UInt32(0); var vs = UInt32(4)
+                if AudioObjectGetPropertyData(first, &la, 0, nil, &vs, &v) == noErr { total += v }
+            }
+        }
+        let rate = sampleRate(id)
+        return rate > 0 ? Double(total) / rate : 0
+    }
+
     static func uid(_ id: AudioDeviceID) -> String? { string(id, kAudioDevicePropertyDeviceUID) }
 
     /// A private aggregate of an output and an input device, clocked by the output, with drift
     /// correction on the input. Only this process sees it; it disappears when the app quits.
     static func makeAggregate(output: AudioDeviceID, input: AudioDeviceID) -> AudioObjectID? {
         guard let outUID = uid(output), let inUID = uid(input) else { return nil }
+        // Sub-devices at different rates make a broken aggregate (wrong channel count, no audio).
+        let outRate = sampleRate(output)
+        if outRate > 0, sampleRate(input) != outRate, !setSampleRate(input, outRate) { return nil }
         let desc: [String: Any] = [
             kAudioAggregateDeviceUIDKey: "com.paulshuler.SongCreator.aggregate.\(UUID().uuidString)",
             kAudioAggregateDeviceNameKey: "Song Creator (\(name(input) ?? "input") + \(name(output) ?? "output"))",
@@ -180,6 +208,17 @@ enum AudioDevices {
         ]
         var id = AudioObjectID(0)
         guard AudioHardwareCreateAggregateDevice(desc as CFDictionary, &id) == noErr, id != 0 else { return nil }
+        // The aggregate configures itself asynchronously (more so right after a rate change). Wait until it
+        // reports the sub-devices' channels and the output's rate, or the engine reads a half-built device.
+        let wantIn = channels(output, kAudioDevicePropertyScopeInput) + channels(input, kAudioDevicePropertyScopeInput)
+        let wantOut = channels(output, kAudioDevicePropertyScopeOutput) + channels(input, kAudioDevicePropertyScopeOutput)
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if channels(id, kAudioDevicePropertyScopeInput) == wantIn,
+               channels(id, kAudioDevicePropertyScopeOutput) == wantOut,
+               outRate <= 0 || sampleRate(id) == outRate { break }
+            usleep(20_000)
+        }
         return id
     }
 

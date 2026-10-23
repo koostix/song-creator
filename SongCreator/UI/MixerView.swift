@@ -163,43 +163,94 @@ struct MasterStrip: View {
 }
 
 /// The track's Audio Unit effects, after the built-in EQ and compressor.
+/// One plugin in a strip: click the name to open its editor, ⏻ bypasses, × removes.
+struct PluginRow: View {
+    let name: String
+    let status: String?
+    var bypassed = false
+    var onBypass: (() -> Void)?
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+    var removeHelp = "Remove this plugin"
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Circle().fill(bypassed ? Theme.dim.opacity(0.4) : (status == nil ? Color.green : Color.orange))
+                .frame(width: 5, height: 5)
+            Text(name).font(.system(size: 9, weight: .medium)).lineLimit(1)
+                .foregroundStyle(bypassed ? Theme.dim : Theme.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onOpen)
+                .help(status ?? "\(name) — click to open its editor")
+            if let onBypass {
+                Button(action: onBypass) {
+                    Image(systemName: "power").font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(bypassed ? Theme.dim : Color.green)
+                }
+                .buttonStyle(.plain)
+                .help(bypassed ? "Bypassed — click to enable" : "Click to bypass")
+            }
+            Button(action: onRemove) {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.dim)
+            }
+            .buttonStyle(.plain)
+            .help(removeHelp)
+        }
+        .padding(.horizontal, 4).frame(height: 16)
+        .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.08)))
+    }
+}
+
+/// The track's plugins: a MIDI track's instrument first, then its effects after the built-in EQ and compressor.
 struct InsertSlots: View {
     @Bindable var session: Session
     let track: Track
 
-    static let visible = 2
-    static let height: CGFloat = 2 * 18 + 14
+    static let rows = 3
+    static let height: CGFloat = CGFloat(rows) * 18 + 14
+
+    /// Effect rows that fit after the instrument row (MIDI tracks) in the fixed-height area.
+    private var visibleInserts: Int { InsertSlots.rows - (track.kind == .midi ? 1 : 0) }
 
     var body: some View {
         VStack(spacing: 2) {
             // Fixed height in every strip so EQ, knobs and faders line up across the mixer.
-            ForEach(track.inserts.prefix(InsertSlots.visible)) { slot in
-                let status = session.pluginStatus(slot)
-                HStack(spacing: 2) {
-                    Circle().fill(slot.bypass ? Theme.dim.opacity(0.4) : (status == nil ? Color.green : Color.orange))
-                        .frame(width: 5, height: 5)
-                    Text(slot.name).font(.system(size: 9, weight: .medium)).lineLimit(1)
-                        .foregroundStyle(slot.bypass ? Theme.dim : Theme.text)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 4).frame(height: 16)
-                .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.08)))
-                .contentShape(Rectangle())
-                .onTapGesture { session.openEditor(slot, track: track) }
-                .help(status ?? "\(slot.manufacturer) \(slot.name) — click to open")
-                .contextMenu {
-                    Button("Open Editor") { session.openEditor(slot, track: track) }
-                    Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: track.id) }
-                    Button("Move Up") { session.moveInsert(slot.id, in: track.id, by: -1) }
-                    Button("Move Down") { session.moveInsert(slot.id, in: track.id, by: 1) }
-                    Divider()
-                    Button("Remove") { session.removeInsert(slot.id, from: track.id) }
+            if track.kind == .midi {
+                if let inst = track.instrument {
+                    PluginRow(name: inst.name, status: session.pluginStatus(inst),
+                              onOpen: { session.openEditor(inst, track: track) },
+                              onRemove: { session.setInstrument(nil, on: track.id) },
+                              removeHelp: "Remove — go back to the built-in sounds")
+                } else {
+                    HStack(spacing: 3) {
+                        Image(systemName: "pianokeys").font(.system(size: 8))
+                        Text(GMPrograms.name(track.program)).font(.system(size: 9, weight: .medium)).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(Theme.dim)
+                    .padding(.horizontal, 4).frame(height: 16)
+                    .help("Built-in sound — change it in the track header")
                 }
             }
-            if track.inserts.count > InsertSlots.visible {
-                Text("+\(track.inserts.count - InsertSlots.visible) more in FX")
+            ForEach(track.inserts.prefix(visibleInserts)) { slot in
+                PluginRow(name: slot.name, status: session.pluginStatus(slot), bypassed: slot.bypass,
+                          onBypass: { session.toggleBypass(slot.id, in: track.id) },
+                          onOpen: { session.openEditor(slot, track: track) },
+                          onRemove: { session.removeInsert(slot.id, from: track.id) })
+                    .contextMenu {
+                        Button("Open Editor") { session.openEditor(slot, track: track) }
+                        Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: track.id) }
+                        Button("Move Up") { session.moveInsert(slot.id, in: track.id, by: -1) }
+                        Button("Move Down") { session.moveInsert(slot.id, in: track.id, by: 1) }
+                        Divider()
+                        Button("Remove") { session.removeInsert(slot.id, from: track.id) }
+                    }
+            }
+            if track.inserts.count > visibleInserts {
+                Text("+\(track.inserts.count - visibleInserts) more in FX")
                     .font(.system(size: 8, weight: .medium)).foregroundStyle(Theme.dim)
-                    .help("Open the track's FX button to see every plugin")
+                    .help("The track's FX button lists every plugin")
             }
             Menu {
                 ForEach(PluginCatalog.grouped(PluginCatalog.effects), id: \.0) { group in

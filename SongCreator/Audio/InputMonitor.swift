@@ -12,6 +12,8 @@ final class InputRing: @unchecked Sendable {
     private let data: UnsafeMutablePointer<Float>
     /// Total frames ever written.
     let written = Atomic<Int>(0)
+    /// Engine render sample of ring frame 0 (-1 until the first write), so frames can be placed in time.
+    let baseSample = Atomic<Int64>(-1)
 
     init(channels: Int) {
         self.channels = max(1, channels)
@@ -22,10 +24,11 @@ final class InputRing: @unchecked Sendable {
 
     deinit { data.deallocate() }
 
-    /// Realtime: copy one input buffer into the ring.
-    func write(_ abl: UnsafePointer<AudioBufferList>, frames: Int) {
+    /// Realtime: copy one input buffer into the ring. `atSample` is the engine render sample of its first frame.
+    func write(_ abl: UnsafePointer<AudioBufferList>, frames: Int, atSample: Int64 = -1) {
         let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
         let w = written.load(ordering: .relaxed)
+        if w == 0, atSample >= 0 { baseSample.store(atSample, ordering: .releasing) }
         var ch = 0
         for buf in list {
             guard let src = buf.mData?.assumingMemoryBound(to: Float.self) else { continue }
