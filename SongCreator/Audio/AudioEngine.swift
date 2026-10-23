@@ -149,7 +149,8 @@ final class AudioEngine {
 
     /// Channels of the chosen input device (in an aggregate, the output device's own inputs are skipped).
     var inputChannelCount: Int {
-        hasInput ? max(0, Int(engine.inputNode.inputFormat(forBus: 0).channelCount) - inputChannelOffset) : 0
+        guard let f = inputFormat else { return 0 }
+        return max(0, Int(f.channelCount) - inputChannelOffset)
     }
     /// Where the chosen input's channel 1 sits in the engine's input (non-zero only for some aggregates).
     private(set) var inputChannelOffset = 0
@@ -159,7 +160,9 @@ final class AudioEngine {
         if let agg = aggregateID { AudioHardwareDestroyAggregateDevice(agg) }
         aggregateID = nil
     }
-    var inputSampleRate: Double { hasInput ? engine.inputNode.inputFormat(forBus: 0).sampleRate : 0 }
+    /// The input's rate and channels come from `inputFormat`: with our own connection the input node can
+    /// still report the system default device, which has nothing to do with the chosen input.
+    var inputSampleRate: Double { inputFormat?.sampleRate ?? 0 }
 
     /// Build a fresh engine graph, optionally on specific devices.
     func build(song: Song, inputDevice: AudioDeviceID?, outputDevice: AudioDeviceID?, inputEnabled: Bool = true,
@@ -283,7 +286,7 @@ final class AudioEngine {
             do {
                 try engine.enableManualRenderingMode(.realtime, format: stereo, maximumFrameCount: hal.maxFrames)
                 if hal.inputChannels > 0,
-                   let inFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: AVAudioChannelCount(hal.inputChannels)) {
+                   let inFormat = AudioEngine.floatFormat(sampleRate, channels: hal.inputChannels) {
                     _ = engine.inputNode.setManualRenderingInputPCMFormat(inFormat) { _ in hal.inputBufferList }
                     manualInputFormat = inFormat
                 }
@@ -649,6 +652,14 @@ final class AudioEngine {
 
     private func setParam(_ unit: AVAudioUnit, _ id: AudioUnitParameterID, _ value: Double) {
         AudioUnitSetParameter(unit.audioUnit, id, kAudioUnitScope_Global, 0, AudioUnitParameterValue(value), 0)
+    }
+
+    /// Deinterleaved float format for any channel count. The plain "standard format" initializer returns nil
+    /// above 2 channels (an interface with 4 inputs, say) unless a channel layout is given.
+    static func floatFormat(_ rate: Double, channels: Int) -> AVAudioFormat? {
+        if channels <= 2 { return AVAudioFormat(standardFormatWithSampleRate: rate, channels: AVAudioChannelCount(max(1, channels))) }
+        guard let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)) else { return nil }
+        return AVAudioFormat(standardFormatWithSampleRate: rate, channelLayout: layout)
     }
 
     static func gain(_ db: Double) -> Float { db <= -60 ? 0 : Float(pow(10, db / 20)) }

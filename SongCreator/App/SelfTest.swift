@@ -521,6 +521,10 @@ enum SelfTest {
         let renamedProject = lib.renameProject("EP 2", to: "Live Session")
         try check(renamedProject == "Live Session" && lib.projects.contains("Live Session"), "rename a project")
 
+        print("Multichannel inputs")
+        try check(AudioEngine.floatFormat(48000, channels: 4)?.channelCount == 4 && AudioEngine.floatFormat(48000, channels: 18)?.channelCount == 18,
+                  "formats for 4- and 18-input interfaces (the plain initializer gives nil above 2)")
+
         print("Explicit device choices")
         if let mic = AudioDevices.all().first(where: { $0.uid == "BuiltInMicrophoneDevice" }),
            let spk = AudioDevices.all().first(where: { $0.uid == "BuiltInSpeakerDevice" }) {

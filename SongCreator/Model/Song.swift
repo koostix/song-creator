@@ -262,7 +262,9 @@ struct Song: Codable, Equatable {
         let f = DateFormatter()
         f.dateFormat = "MMM d h.mm a"
         var song = Song(name: "Idea \(f.string(from: Date()))")
-        song.tracks = [Track(name: "Track 1", armed: true)]
+        // Monitoring on from the start: you hear yourself in headphones, and feedback protection keeps it
+        // quiet while sound plays through the speakers.
+        song.tracks = [Track(name: "Track 1", armed: true, monitor: true)]
         return song
     }
 }

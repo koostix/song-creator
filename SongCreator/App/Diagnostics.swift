@@ -47,7 +47,8 @@ enum Diagnostics {
             recorder.installTap(on: audio)
             let deadline = Date().addingTimeInterval(1.0)
             while Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-            add("input level after 1 s: \(String(format: "%.4f", audio.meters.input(0))) (0 means no audio arrived)")
+            let levels = (0..<audio.inputChannelCount).map { String(format: "%.4f", audio.meters.input($0 + audio.inputChannelOffset)) }
+            add("input levels after 1 s (per input channel): \(levels.joined(separator: " ")) (0 means no audio arrived)")
         }
         audio.engine.stop()
         audio.destroyAggregate()
@@ -151,6 +152,19 @@ enum SmokeTest {
 
         let auth = AVCaptureDevice.authorizationStatus(for: .audio)
         lines.append("mic permission: \(auth == .authorized ? "authorized" : "NOT authorized (\(auth.rawValue))")")
+
+        // First, exactly the user's own saved settings.
+        do {
+            lines.append("your current settings: in \(saved.0 ?? "default") / out \(saved.1 ?? "default"), input \(saved.2 ? "on" : "off"), buffer \(saved.3)")
+            let s = newSession("current settings")
+            lines.append("  engine running=\(s.audio.engine.isRunning) ownIO=\(s.audio.usesOwnIO) input=\(s.audio.hasInput) "
+                         + "channels=\(s.inputChannelCount) offset=\(s.audio.inputChannelOffset) rate=\(s.sampleRate) message=\(s.message ?? "none")")
+            spin(0.5)
+            let levels = (0..<6).map { String(format: "%.4f", s.audio.meters.input($0)) }.joined(separator: " ")
+            lines.append("  input levels by engine channel: \(levels)")
+            recordPass(s, "your settings", expectAudio: saved.2)
+            s.close()
+        }
 
         let setups: [(String, String?, String?, Bool, Int)] = [
             ("system default", nil, nil, true, 256),

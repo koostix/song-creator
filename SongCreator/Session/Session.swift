@@ -128,6 +128,7 @@ final class Session {
     var monitoringMuted: Bool { feedbackProtection && onSpeakers }
     @ObservationIgnored private var speakerListener: (AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)?
     @ObservationIgnored private var deviceMessage: String?
+    @ObservationIgnored private var bluetoothHintShown = false
     @ObservationIgnored private var deviceListeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
     @ObservationIgnored private var deviceListObserver: NSObjectProtocol?
     var inputUID: String? = Prefs.inputUID
@@ -301,6 +302,13 @@ final class Session {
         watchSpeakers()
         watchDevices()
         updateMonitorSafety()
+        // Recording is expected on headphones. Bluetooth ones work, but add delay you'd hear while
+        // monitoring, and their own mic drops to call quality, so point that out once.
+        if !bluetoothHintShown, message == nil, let out = audio.outputDeviceID,
+           AudioDevices.transportType(out) == kAudioDeviceTransportTypeBluetooth {
+            bluetoothHintShown = true
+            message = "\(AudioDevices.name(out) ?? "Bluetooth headphones") add a short delay. For recording, wired headphones and the MacBook mic work best."
+        }
     }
 
     /// The song's rate drives the hardware, like any DAW: a song with recordings switches the output
@@ -917,7 +925,7 @@ final class Session {
         edit { s in
             let n = s.tracks.count + 1
             var t = Track(name: kind == .midi ? "Keys \(n)" : "Track \(n)", kind: kind, colorIndex: s.tracks.count % TrackPalette.count)
-            if kind == .midi { t.channels = 2 }
+            if kind == .midi { t.channels = 2 } else { t.monitor = true }   // ready for headphones
             if let sel = selectedTrackID, let i = s.trackIndex(sel) {
                 s.tracks.insert(t, at: i + 1)
             } else {
