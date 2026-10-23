@@ -219,6 +219,24 @@ enum SelfTest {
         try check(Session.jamEnd(loop: loop4, stoppedAt: 32.3, beat: 0.5) == 32, "stop just into a new pass doesn't add one")
         try check(Session.jamEnd(loop: loop4, stoppedAt: 3, beat: 0.5) == 8, "always at least one pass")
 
+        print("Silence while recording")
+        var armedT = Track(name: "armed", armed: true)
+        let oldTake = Take(name: "old", fileName: "o", start: 0, duration: 10)
+        armedT.takes = [oldTake]
+        armedT.assign(takeID: oldTake.id, over: oldTake.range)
+        var otherT = armedT
+        otherT.id = UUID()
+        otherT.armed = false
+        var rs = Song(name: "r")
+        rs.tracks = [armedT, otherT]
+        let punchHeard = rs.mutingRecording(tracks: [armedT.id], over: TimeRange(start: 4, end: 8))
+        try check(punchHeard.tracks[0].comp.map(\.range) == [TimeRange(start: 0, end: 4), TimeRange(start: 8, end: 10)]
+                  && punchHeard.tracks[1].comp.count == 1,
+                  "punch: the armed track's old take is silent between punch-in and punch-out; other tracks play")
+        let overdubHeard = rs.mutingRecording(tracks: [armedT.id], over: TimeRange(start: 3, end: .greatestFiniteMagnitude))
+        try check(overdubHeard.tracks[0].comp.map(\.range) == [TimeRange(start: 0, end: 3)], "overdub: silent from where recording starts")
+        try check(rs.tracks[0].comp.count == 1, "the song itself is untouched")
+
         print("Automation curve")
         let pts = [AutoPoint(time: 1, value: -10), AutoPoint(time: 3, value: 0)]
         try check(Track.evaluate(pts, at: 0) == -10 && Track.evaluate(pts, at: 2) == -5 && Track.evaluate(pts, at: 9) == 0, "linear interpolation")

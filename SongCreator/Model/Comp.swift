@@ -149,6 +149,13 @@ extension Track {
 }
 
 extension Song {
+    /// The song as heard while recording: the given (armed) tracks are silent over `range`.
+    func mutingRecording(tracks ids: Set<UUID>, over range: TimeRange) -> Song {
+        var s = self
+        for i in s.tracks.indices where ids.contains(s.tracks[i].id) { s.tracks[i].clearComp(range) }
+        return s
+    }
+
     /// The song with every track except `excluding` looped out from `loop` to `end`.
     func tilingLoop(_ loop: TimeRange, until end: Double, excluding: Set<UUID>) -> Song {
         var s = self

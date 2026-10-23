@@ -190,8 +190,21 @@ final class Session {
 
     /// What the transport plays: the song, or during a JAM pass the song with the loop repeated ahead.
     private var playbackSong: Song {
-        guard let loop = jamLoop else { return song }
-        return song.tilingLoop(loop, until: loop.start + Session.jamHorizon, excluding: jamExcluded)
+        var s = song
+        if let loop = jamLoop {
+            s = s.tilingLoop(loop, until: loop.start + Session.jamHorizon, excluding: jamExcluded)
+        }
+        if let mute = recordMute { s = s.mutingRecording(tracks: mute.tracks, over: mute.range) }
+        return s
+    }
+
+    /// While recording, the armed tracks' existing takes are silent over this range (the punch range, or
+    /// from where recording starts), so you only hear what you're playing now.
+    @ObservationIgnored private var recordMute: (tracks: Set<UUID>, range: TimeRange)?
+
+    private func startRecordMute(from start: Double) {
+        let range = song.punchEnabled ? song.punch : TimeRange(start: start, end: .greatestFiniteMagnitude)
+        recordMute = (Set(song.tracks.filter(\.armed).map(\.id)), range)
     }
 
     /// Where a JAM pass's paste-out ends: the stop position rounded up to a whole loop pass,
@@ -725,6 +738,8 @@ final class Session {
         if isPlaying, let timing = transport.timing, let pos = transport.currentPosition() {
             // Punch in on the fly.
             recStartSong = song.punchEnabled ? max(pos, song.punch.start) : pos
+            startRecordMute(from: recStartSong)
+            transport.update(song: playbackSong)
             let now = HostTime.seconds(HostTime.now) - HostTime.seconds(timing.anchorHost)
             recStartPlayer = max(0, now - audio.outputLatency)
             recorder.begin(targets: targets, sampleRate: audio.sampleRate)
@@ -742,6 +757,7 @@ final class Session {
             }
             let countIn = Double(song.countInBars) * song.secondsPerBar
             recStartSong = song.punchEnabled ? max(song.punch.start, start) : start
+            startRecordMute(from: recStartSong)
             recorder.begin(targets: targets, sampleRate: audio.sampleRate)
             try? audio.start()
             playStart = start
@@ -779,6 +795,7 @@ final class Session {
 
     private func finishRecording() {
         isRecording = false
+        recordMute = nil
         guard let timing = transport.timing else { _ = recorder.finish(); jamLoop = nil; return }
         let map = timing.map
         let anchor = HostTime.seconds(timing.anchorHost)
