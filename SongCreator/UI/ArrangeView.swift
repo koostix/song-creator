@@ -2,7 +2,7 @@ import SwiftUI
 
 enum Layout {
     static let headerWidth: CGFloat = 236
-    static let rulerHeight: CGFloat = 26
+    static let rulerHeight: CGFloat = 32
     static let markerHeight: CGFloat = 20
     static let laneHeight: CGFloat = 76
     static let takeHeight: CGFloat = 32
@@ -136,12 +136,17 @@ struct TrackListCorner: View {
 struct RulerView: View {
     @Bindable var session: Session
 
-    enum LoopDrag { case newLoop, moveLoop, loopStart, loopEnd }
-    @State private var loopDrag: LoopDrag?
-    @State private var loopAtStart = TimeRange(start: 0, end: 0)
+    /// The two editable ranges in the ruler: loop (yellow, top strip) and punch (pink, bottom strip).
+    enum Bar { case loop, punch }
+    enum Grab { case new, move, start, end }
+
+    @State private var drag: (bar: Bar, grab: Grab)?
+    @State private var rangeAtStart = TimeRange(start: 0, end: 0)
     @State private var moved = false
     @State private var renaming: Marker?
     @State private var renameText = ""
+
+    static let barHeight: CGFloat = 7
 
     var body: some View {
         let scale = session.scale
@@ -151,34 +156,36 @@ struct RulerView: View {
                 drawGridLabels(ctx, size, scale, song)
                 if song.loop.isValid {
                     let r = CGRect(x: scale.x(song.loop.start), y: 0,
-                                   width: scale.x(song.loop.end) - scale.x(song.loop.start), height: 9)
+                                   width: scale.x(song.loop.end) - scale.x(song.loop.start), height: RulerView.barHeight + 2)
                     ctx.fill(Path(roundedRect: r, cornerRadius: 2),
                              with: .color(Theme.loop.opacity(song.loopEnabled ? 0.85 : 0.25)))
                 }
-                if song.punchEnabled, song.punch.isValid {
-                    let r = CGRect(x: scale.x(song.punch.start), y: size.height - 3,
-                                   width: scale.x(song.punch.end) - scale.x(song.punch.start), height: 3)
-                    ctx.fill(Path(r), with: .color(Theme.punch))
+                if song.punch.isValid {
+                    let r = CGRect(x: scale.x(song.punch.start), y: size.height - RulerView.barHeight,
+                                   width: scale.x(song.punch.end) - scale.x(song.punch.start), height: RulerView.barHeight)
+                    ctx.fill(Path(roundedRect: r, cornerRadius: 2),
+                             with: .color(Theme.punch.opacity(song.punchEnabled ? 0.85 : 0.25)))
                 }
             }
             .frame(height: Layout.rulerHeight)
             .contentShape(Rectangle())
             .onContinuousHover { phase in
-                guard loopDrag == nil else { return }
+                guard drag == nil else { return }
                 if case .active(let p) = phase {
-                    switch hit(p, scale) {
-                    case .loopStart, .loopEnd: NSCursor.resizeLeftRight.set()
-                    case .moveLoop: NSCursor.openHand.set()
-                    default: NSCursor.arrow.set()
+                    switch hit(p, scale).grab {
+                    case .start, .end: NSCursor.resizeLeftRight.set()
+                    case .move: NSCursor.openHand.set()
+                    case .new: NSCursor.arrow.set()
                     }
                 } else {
                     NSCursor.arrow.set()
                 }
             }
             .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { g in loopChanged(g, scale) }
-                .onEnded { g in loopEnded(g, scale) })
-            .help("Click to move the playhead, drag to draw a loop. On the loop bar: drag its edges to resize it, drag the middle to move it, click to turn looping on or off.")
+                .onChanged { g in dragChanged(g, scale) }
+                .onEnded { g in dragEnded(g, scale) })
+            .help("Click to move the playhead, drag to draw a loop. Yellow loop bar (top) and pink punch bar (bottom): "
+                  + "drag the edges to resize, drag the middle to move, click to turn it on or off. Drag along the bottom strip to draw a punch range.")
 
             ZStack(alignment: .topLeading) {
                 Color.black.opacity(0.15)
@@ -194,59 +201,70 @@ struct RulerView: View {
         .clipped()
     }
 
-    /// The yellow loop bar sits in the top 9 px; give its edges and body a slightly larger target.
-    private func hit(_ p: CGPoint, _ scale: TimeScale) -> LoopDrag {
-        let loop = session.song.loop
-        guard loop.isValid, p.y <= 13 else { return .newLoop }
-        let xs = scale.x(loop.start), xe = scale.x(loop.end)
-        if abs(p.x - xs) < 6 { return .loopStart }
-        if abs(p.x - xe) < 6 { return .loopEnd }
-        if p.x > xs, p.x < xe { return .moveLoop }
-        return .newLoop
+    private func range(_ bar: Bar) -> TimeRange { bar == .loop ? session.song.loop : session.song.punch }
+
+    /// Which bar and which part of it a press at `p` grabs. Each strip is a bit taller than its bar so it's easy to hit.
+    private func hit(_ p: CGPoint, _ scale: TimeScale) -> (bar: Bar, grab: Grab) {
+        let bar: Bar
+        if p.y <= RulerView.barHeight + 6 {
+            bar = .loop
+        } else if p.y >= Layout.rulerHeight - RulerView.barHeight - 4 {
+            bar = .punch
+        } else {
+            return (.loop, .new)          // the middle of the ruler draws loops, like before
+        }
+        let r = range(bar)
+        guard r.isValid else { return (bar, .new) }
+        let xs = scale.x(r.start), xe = scale.x(r.end)
+        if abs(p.x - xs) < 6 { return (bar, .start) }
+        if abs(p.x - xe) < 6 { return (bar, .end) }
+        if p.x > xs, p.x < xe { return (bar, .move) }
+        return (bar, .new)
     }
 
-    private func loopChanged(_ g: DragGesture.Value, _ scale: TimeScale) {
-        if loopDrag == nil {
-            loopDrag = hit(g.startLocation, scale)
-            loopAtStart = session.song.loop
+    private func dragChanged(_ g: DragGesture.Value, _ scale: TimeScale) {
+        if drag == nil {
+            drag = hit(g.startLocation, scale)
+            rangeAtStart = range(drag!.bar)
             moved = false
             session.beginGesture()
-            if loopDrag == .moveLoop { NSCursor.closedHand.set() }
+            if drag!.grab == .move { NSCursor.closedHand.set() }
         }
-        guard moved || abs(g.translation.width) > 3 else { return }
+        guard moved || abs(g.translation.width) > 3, let (bar, grab) = drag else { return }
         moved = true
         let dt = Double(g.translation.width) / scale.pps
-        let orig = loopAtStart
+        let orig = rangeAtStart
         let minLen = session.song.secondsPerBeat
         var r: TimeRange
-        switch loopDrag! {
-        case .newLoop:
+        switch grab {
+        case .new:
             let a = session.snap(scale.t(g.startLocation.x)), b = session.snap(scale.t(g.location.x))
             r = TimeRange(start: min(a, b), end: max(a, b))
-        case .moveLoop:
+        case .move:
             let start = max(0, session.snap(orig.start + dt))
             r = TimeRange(start: start, end: start + orig.length)
-        case .loopStart:
+        case .start:
             r = TimeRange(start: min(session.snap(orig.start + dt), orig.end - minLen), end: orig.end)
-        case .loopEnd:
+        case .end:
             r = TimeRange(start: orig.start, end: max(session.snap(orig.end + dt), orig.start + minLen))
         }
         session.previewGesture { s in
-            s.loop = r
-            s.loopEnabled = true
+            if bar == .loop { s.loop = r; s.loopEnabled = true } else { s.punch = r; s.punchEnabled = true }
         }
     }
 
-    private func loopEnded(_ g: DragGesture.Value, _ scale: TimeScale) {
-        if !moved {
-            if loopDrag == .newLoop {
+    private func dragEnded(_ g: DragGesture.Value, _ scale: TimeScale) {
+        if !moved, let (bar, grab) = drag {
+            if grab == .new {
                 session.locate(session.snap(scale.t(g.location.x)))
             } else {
-                session.previewGesture { $0.loopEnabled.toggle() }
+                session.previewGesture { s in
+                    if bar == .loop { s.loopEnabled.toggle() } else { s.punchEnabled.toggle() }
+                }
             }
         }
         session.endGesture()
-        loopDrag = nil
+        drag = nil
         moved = false
         NSCursor.arrow.set()
     }
