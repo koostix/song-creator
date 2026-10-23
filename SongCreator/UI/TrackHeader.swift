@@ -67,7 +67,7 @@ struct TrackHeader: View {
                     LitButton(label: "A", on: track.showAutomation, color: .green, help: "Show volume/pan automation") {
                         session.updateTrack(track.id, undoable: false) { $0.showAutomation.toggle() }
                     }
-                    if track.kind == .audio { inputMenu } else { instrumentMenu }
+                    if track.kind == .audio { inputMenu } else { quantizeMenu; instrumentMenu }
                     Spacer(minLength: 0)
                     if !track.takes.isEmpty {
                         Button {
@@ -190,6 +190,48 @@ struct TrackHeader: View {
         .fixedSize()
         .help(track.external.map { "Plays \($0.deviceName) on MIDI channel \($0.channel)" }
               ?? track.instrument.flatMap { session.pluginStatus($0) } ?? "Instrument for this track")
+    }
+
+    /// Non-destructive quantize: notes play on the grid, the recording stays as played.
+    private var quantizeMenu: some View {
+        let q = track.quantize
+        return Menu {
+            Button(q == nil ? "✓ Off (as played)" : "Off (as played)") { session.updateTrack(track.id) { $0.quantize = nil } }
+            Section("Grid") {
+                ForEach(Quantize.Grid.allCases) { g in
+                    Button((q?.grid == g ? "✓ " : "") + g.label) {
+                        session.updateTrack(track.id) { t in
+                            var nq = t.quantize ?? Quantize()
+                            nq.grid = g
+                            t.quantize = nq
+                        }
+                    }
+                }
+            }
+            Menu("Strength (\(Int((q?.strength ?? 1) * 100))%)") {
+                ForEach([1.0, 0.75, 0.5, 0.25], id: \.self) { v in
+                    Button("\(Int(v * 100))%") {
+                        session.updateTrack(track.id) { t in var nq = t.quantize ?? Quantize(); nq.strength = v; t.quantize = nq }
+                    }
+                }
+            }
+            Menu("Swing (\(q.map { $0.swing <= 0.501 ? "straight" : "\(Int(($0.swing * 100).rounded()))%" } ?? "straight"))") {
+                ForEach([0.5, 0.54, 0.58, 0.62, 0.66], id: \.self) { v in
+                    Button(v == 0.5 ? "Straight" : "\(Int((v * 100).rounded()))%") {
+                        session.updateTrack(track.id) { t in var nq = t.quantize ?? Quantize(); nq.swing = v; t.quantize = nq }
+                    }
+                }
+            }
+        } label: {
+            Text("Q")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .frame(width: 22, height: 18)
+                .foregroundStyle(q != nil ? Color.black : Theme.dim)
+                .background(RoundedRectangle(cornerRadius: 4).fill(q != nil ? Color.mint : Color.white.opacity(0.08)))
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help(q.map { "Quantize \($0.grid.label), \(Int($0.strength * 100))%\($0.swing > 0.501 ? ", swing \(Int(($0.swing * 100).rounded()))%" : "") — notes play on the grid, the recording stays as played" }
+              ?? "Quantize (off): notes play as recorded")
     }
 
     private var instrumentLabel: String {

@@ -238,6 +238,17 @@ enum SelfTest {
         try check(overdubHeard.tracks[0].comp.map(\.range) == [TimeRange(start: 0, end: 3)], "overdub: silent from where recording starts")
         try check(rs.tracks[0].comp.count == 1, "the song itself is untouched")
 
+        print("Quantize")
+        let spb = 0.5   // 120 BPM
+        let q16 = Quantize(grid: .sixteenth)
+        try check(abs(q16.apply(0.14, secondsPerBeat: spb) - 0.125) < 1e-9 && abs(q16.apply(0.2, secondsPerBeat: spb) - 0.25) < 1e-9,
+                  "1/16 at 120 BPM snaps to 125 ms steps")
+        try check(abs(Quantize(grid: .quarter, strength: 0.5).apply(0.6, secondsPerBeat: spb) - 0.55) < 1e-9, "50% strength moves halfway")
+        try check(abs(Quantize(grid: .eighthTriplet).apply(0.17, secondsPerBeat: spb) - 1.0 / 6) < 1e-9, "triplet grid")
+        let swung = Quantize(grid: .eighth, swing: 0.66)
+        try check(abs(swung.apply(0.3, secondsPerBeat: spb) - 0.33) < 1e-9 && abs(swung.apply(0.48, secondsPerBeat: spb) - 0.5) < 1e-9,
+                  "66% swing pushes the off-beat eighth late, leaves the beat alone")
+
         print("Automation curve")
         let pts = [AutoPoint(time: 1, value: -10), AutoPoint(time: 3, value: 0)]
         try check(Track.evaluate(pts, at: 0) == -10 && Track.evaluate(pts, at: 2) == -5 && Track.evaluate(pts, at: 9) == 0, "linear interpolation")
@@ -329,6 +340,19 @@ enum SelfTest {
         try check(back.rms > 0.1 && abs(back.freq - 440) < 15, "comp returns to take 1 after 4 s")
         try check(mix.window(5.3, 5.9).rms < 0.01, "silence between audio and MIDI")
         try check(mix.window(6.1, 6.8).rms > 0.005, "MIDI note renders through the built-in sampler")
+        // Quantize moves a late note onto the beat in the rendered audio.
+        var lateKeys = Track(name: "Late", kind: .midi, channels: 2)
+        let lateTake = Take(name: "t", start: 0, duration: 2, notes: [MIDINote(pitch: 60, velocity: 110, start: 0.53, duration: 0.5)])
+        lateKeys.takes = [lateTake]
+        lateKeys.assign(takeID: lateTake.id, over: lateTake.range)
+        var qSong = song
+        qSong.tempo = 120
+        qSong.tracks = [lateKeys]
+        let asPlayed = try render(qSong, audio: audio, dir: dir, length: 1.5, name: "q-off.wav").onset(after: 0, threshold: 0.002)
+        qSong.tracks[0].quantize = Quantize(grid: .quarter)
+        let onGrid = try render(qSong, audio: audio, dir: dir, length: 1.5, name: "q-on.wav").onset(after: 0, threshold: 0.002)
+        print(String(format: "  onset as played %.4f s, quantized %.4f s", asPlayed, onGrid))
+        try check(abs((asPlayed - onGrid) - 0.03) < 0.003, "quantize moves a note played 30 ms late onto the beat")
         try check(abs(mix.onset(after: 0) - 1) * 1000 < 5, "take starts sample-accurately at 1 s")
 
         // 1b. A split in continuous audio is seamless (crossfade, no dip at the edit).

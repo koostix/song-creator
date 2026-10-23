@@ -131,6 +131,74 @@ struct ExternalMIDI: Codable, Equatable {
     }
 }
 
+/// Non-destructive MIDI quantize: notes are moved toward the grid as they play; the recorded notes stay as played.
+struct Quantize: Codable, Equatable {
+    enum Grid: String, Codable, CaseIterable, Identifiable {
+        case quarter, eighth, eighthTriplet, sixteenth, sixteenthTriplet, thirtySecond
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .quarter: return "1/4"
+            case .eighth: return "1/8"
+            case .eighthTriplet: return "1/8T"
+            case .sixteenth: return "1/16"
+            case .sixteenthTriplet: return "1/16T"
+            case .thirtySecond: return "1/32"
+            }
+        }
+        /// Grid spacing in beats (quarter notes).
+        var beats: Double {
+            switch self {
+            case .quarter: return 1
+            case .eighth: return 0.5
+            case .eighthTriplet: return 1.0 / 3
+            case .sixteenth: return 0.25
+            case .sixteenthTriplet: return 1.0 / 6
+            case .thirtySecond: return 0.125
+            }
+        }
+        var isTriplet: Bool { self == .eighthTriplet || self == .sixteenthTriplet }
+    }
+
+    var grid: Grid = .sixteenth
+    /// 1 moves notes all the way onto the grid; 0.5 halfway.
+    var strength: Double = 1
+    /// Where the second note of each grid pair falls: 0.5 is straight, 0.66 is a triplet shuffle.
+    var swing: Double = 0.5
+
+    init(grid: Grid = .sixteenth, strength: Double = 1, swing: Double = 0.5) {
+        self.grid = grid
+        self.strength = strength
+        self.swing = swing
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        grid = try c.decodeIfPresent(Grid.self, forKey: .grid) ?? .sixteenth
+        strength = try c.decodeIfPresent(Double.self, forKey: .strength) ?? 1
+        swing = try c.decodeIfPresent(Double.self, forKey: .swing) ?? 0.5
+    }
+
+    /// Where a note starting at song time `t` plays.
+    func apply(_ t: Double, secondsPerBeat spb: Double) -> Double {
+        let g = grid.beats * spb
+        guard g > 0 else { return t }
+        // Swing works on pairs of grid steps (not for triplet grids, which already swing).
+        let useSwing = !grid.isTriplet && abs(swing - 0.5) > 0.001
+        var target: Double
+        if useSwing {
+            let pair = 2 * g
+            let pairStart = floor(t / pair) * pair
+            let candidates = [pairStart, pairStart + pair * swing, pairStart + pair]
+            target = candidates.min { abs($0 - t) < abs($1 - t) }!
+        } else {
+            target = (t / g).rounded() * g
+        }
+        target = max(0, target)
+        return t + (target - t) * strength
+    }
+}
+
 /// A third-party Audio Unit on a track.
 struct PluginSlot: Codable, Equatable, Identifiable {
     var id = UUID()
@@ -196,10 +264,17 @@ struct Track: Codable, Identifiable, Equatable {
     var instrument: PluginSlot?
     /// Outboard gear for MIDI tracks; when set, notes go to it instead of an instrument.
     var external: ExternalMIDI?
+    /// MIDI quantize applied as notes play (nil = as played).
+    var quantize: Quantize?
 
     func take(_ id: UUID) -> Take? { takes.first { $0.id == id } }
 
     func points(_ p: AutoParam) -> [AutoPoint] { p == .volume ? volumeAuto : panAuto }
+
+    /// Where a note that starts at song time `t` actually plays, after this track's quantize.
+    func playTime(_ t: Double, secondsPerBeat spb: Double) -> Double {
+        quantize?.apply(t, secondsPerBeat: spb) ?? t
+    }
 
     var hasAutomation: Bool { autoRead && (!volumeAuto.isEmpty || !panAuto.isEmpty) }
 
@@ -371,5 +446,6 @@ extension Track {
         inserts = try c.decodeIfPresent([PluginSlot].self, forKey: .inserts) ?? []
         instrument = try c.decodeIfPresent(PluginSlot.self, forKey: .instrument)
         external = try c.decodeIfPresent(ExternalMIDI.self, forKey: .external)
+        quantize = try c.decodeIfPresent(Quantize.self, forKey: .quantize)
     }
 }

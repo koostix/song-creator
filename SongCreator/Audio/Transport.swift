@@ -235,13 +235,19 @@ final class Transport {
             for seg in track.comp where seg.end > a && seg.start <= b {
                 guard let take = track.take(seg.takeID) else { continue }
                 for note in take.notes {
-                    let on = take.start + seg.offset + note.start
+                    // Which region a note belongs to is decided by where it was played; quantize then moves
+                    // it (keeping its length), staying inside the region and the loop.
+                    let played = take.start + seg.offset + note.start
+                    guard played >= seg.start, played < seg.end else { continue }
+                    var on = track.playTime(played, secondsPerBeat: song.secondsPerBeat)
+                    on = min(max(on, seg.start), seg.end - 0.001)
+                    if let loopEnd { on = min(on, loopEnd - 0.001) }
                     var off = min(on + note.duration, seg.end)
                     if let loopEnd { off = min(off, loopEnd) }
-                    if on >= seg.start, on < seg.end, on >= a, on < b {
+                    if on >= a, on < b {
                         emit(p, on, [0x90, note.pitch, note.velocity])
                     }
-                    if on >= seg.start, on < seg.end, off > a, off <= b {
+                    if off > a, off <= b {
                         emit(p, off, [0x80, note.pitch, 0])
                     }
                 }

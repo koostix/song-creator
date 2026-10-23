@@ -433,7 +433,7 @@ struct MainLane: View {
                     let rect = CGRect(x: x0, y: 3, width: max(1, x1 - x0), height: size.height - 6)
                     ctx.fill(Path(roundedRect: rect, cornerRadius: 4), with: .color(color.opacity(track.mute ? 0.08 : (selected ? 0.38 : 0.22))))
                     LaneDrawing.content(ctx, rect: rect, take: take, offset: seg.offset, from: seg.start, to: seg.end, scale: scale,
-                                        session: session, color: color.opacity(track.mute ? 0.35 : 0.95))
+                                        session: session, color: color.opacity(track.mute ? 0.35 : 0.95), quantize: track.quantize)
                     LaneDrawing.fades(ctx, rect: rect, seg: seg, scale: scale)
                     ctx.stroke(Path(roundedRect: rect, cornerRadius: 4),
                                with: .color(selected ? Color.white : color.opacity(0.5)), lineWidth: selected ? 1.5 : 1)
@@ -708,7 +708,7 @@ enum LaneDrawing {
     }
 
     static func content(_ ctx: GraphicsContext, rect: CGRect, take: Take, offset: Double, from: Double, to: Double,
-                        scale: TimeScale, session: Session, color: Color) {
+                        scale: TimeScale, session: Session, color: Color, quantize: Quantize? = nil) {
         let visible = rect.intersection(CGRect(x: 0, y: rect.minY, width: session.timelineWidth, height: rect.height))
         guard !visible.isEmpty else { return }
         if let file = take.fileName {
@@ -738,9 +738,11 @@ enum LaneDrawing {
             let lo = (pitches.min() ?? 60) - 2, hi = (pitches.max() ?? 72) + 2
             let rowH = max(1.5, min(5, (rect.height - 8) / CGFloat(hi - lo)))
             for n in take.notes {
-                let s = take.start + offset + n.start
+                let played = take.start + offset + n.start
+                guard played >= from, played < to else { continue }
+                let s = quantize?.apply(played, secondsPerBeat: session.song.secondsPerBeat) ?? played
                 let e = min(s + n.duration, to)
-                guard e > from, s < to, s >= from else { continue }
+                guard e > from else { continue }
                 let y = rect.maxY - 4 - CGFloat(Int(n.pitch) - lo) * (rect.height - 8) / CGFloat(hi - lo)
                 let r = CGRect(x: scale.x(s), y: y - rowH / 2, width: max(2, scale.x(e) - scale.x(s)), height: rowH)
                 ctx.fill(Path(roundedRect: r, cornerRadius: 1), with: .color(color))
