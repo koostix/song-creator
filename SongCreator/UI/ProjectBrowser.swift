@@ -598,6 +598,8 @@ struct ShortcutsList: View {
         ("A M S", "Arm / mute / solo track"), ("B", "Split at playhead"), ("⌘C ⌘V ⌘D", "Copy / paste / duplicate regions"),
         ("T / ⇧T", "New audio / MIDI track"), ("Z", "Zoom to fit"), ("⌘K", "Computer keyboard as MIDI"),
         ("X", "Mixer"), ("⌘E", "Export mixdown"),
+        ("= / −", "Zoom in / out (or pinch, ⌘-scroll)"), ("⌫", "Delete selected regions"), ("Esc", "Clear selection"),
+        ("⌘Z ⇧⌘Z", "Undo / redo"), ("Tab", "While renaming: next track"), ("⌘,", "Audio settings"),
     ]
 
     var body: some View {

@@ -134,7 +134,7 @@ struct StatusBar: View {
                 Text(session.isRecording ? "Recording… press R or Space to stop"
                      : session.musicalTyping ? StatusBar.keysHint(session)
                      : session.jamReady ? "JAM is on: press R to record one long take over the repeating loop. It's pasted out to match when you stop."
-                     : "Space play · R record · ⇧M marker · L loop · T new track · X mixer · drag across a take lane to comp")
+                     : "Space play · R record · L loop · J jam · B split · ⇧M marker · Z fit · X mixer · ⌘K keys · drag across a take lane to comp")
                     .foregroundStyle(Theme.dim)
             }
             Spacer()

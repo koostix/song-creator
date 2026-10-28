@@ -184,11 +184,13 @@ struct TrackHeader: View {
             Text(instrumentLabel)
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(track.instrument.flatMap { session.pluginStatus($0) } != nil ? Color.orange
-                                 : track.external != nil ? Theme.accent : Theme.text)
+                                 : track.external.map { session.isConnected($0) ? Theme.accent : Color.orange } ?? Theme.text)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help(track.external.map { "Plays \($0.deviceName) on MIDI channel \($0.channel)" }
+        .help(track.external.map { ext in session.isConnected(ext)
+                  ? "Plays \(ext.deviceName) on MIDI channel \(ext.channel)"
+                  : "\(ext.deviceName) isn't connected. Plug it in, or pick another instrument here." }
               ?? track.instrument.flatMap { session.pluginStatus($0) } ?? "Instrument for this track")
     }
 
@@ -235,7 +237,9 @@ struct TrackHeader: View {
     }
 
     private var instrumentLabel: String {
-        if let ext = track.external { return "⇄ \(ext.deviceName) ch\(ext.channel)" }
+        if let ext = track.external {
+            return "⇄ \(ext.deviceName) ch\(ext.channel)" + (session.isConnected(ext) ? "" : " (not connected)")
+        }
         return track.instrument?.name ?? GMPrograms.name(track.program)
     }
 

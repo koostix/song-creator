@@ -163,6 +163,15 @@ enum SmokeTest {
             let levels = (0..<6).map { String(format: "%.4f", s.audio.meters.input($0)) }.joined(separator: " ")
             lines.append("  input levels by engine channel: \(levels)")
             recordPass(s, "your settings", expectAudio: saved.2)
+            if saved.2, let armed = s.song.tracks.first(where: \.armed) {
+                s.startRecording()
+                spin(0.5)
+                s.deleteTrack(armed.id)
+                let kept = s.song.tracks.contains { $0.id == armed.id }
+                s.stop()
+                spin(0.3)
+                check(kept, "a track can't be deleted while it's recording")
+            }
             s.close()
         }
 

@@ -774,6 +774,25 @@ enum SelfTest {
             UserDefaults.standard.set(all, forKey: "timelineView")
         }
 
+        print("Usability")
+        do {
+            let mdir = dir.appendingPathComponent("MissingSong")
+            try FileManager.default.createDirectory(at: mdir.appendingPathComponent("Audio"), withIntermediateDirectories: true)
+            var ms = Song.newIdea()
+            let gone = Take(name: "gone", fileName: "deleted-in-finder.caf", start: 0, duration: 2)
+            ms.tracks[0].takes = [gone]
+            ms.tracks[0].assign(takeID: gone.id, over: gone.range)
+            let missingSession = Session(projectURL: mdir, song: ms)
+            try check(missingSession.message?.contains("missing") == true, "opening a song with a missing recording says so")
+            missingSession.followSuspended = true
+            missingSession.play(from: 0)
+            try check(!missingSession.followSuspended, "following the playhead resumes on the next play")
+            missingSession.stop()
+            try check(!missingSession.isConnected(ExternalMIDI(deviceID: -12345, deviceName: "Gone", channel: 1)),
+                      "an unplugged external MIDI device shows as not connected")
+            missingSession.close()
+        }
+
         print("Auto-arm monitoring")
         for mode in [AutoArmMode.newTrack, .nextTrack] {
             var s = Song.newIdea()

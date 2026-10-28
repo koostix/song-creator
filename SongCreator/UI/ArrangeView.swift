@@ -82,9 +82,16 @@ struct ArrangeView: View {
 
     /// Horizontal swipes scroll the timeline; ⌘/⌥ + scroll zooms around the pointer.
     private func installScroll() {
-        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { e in
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .magnify]) { e in
             guard hovering else { return e }
             let s = session
+            if e.type == .magnify {
+                // Trackpad pinch zooms around the pointer.
+                let anchor = s.scale.t(hoverX)
+                s.pixelsPerSecond = min(800, max(4, s.pixelsPerSecond * (1 + e.magnification)))
+                s.scrollX = max(0, anchor - Double(hoverX) / s.pixelsPerSecond)
+                return nil
+            }
             let precise = e.hasPreciseScrollingDeltas
             let dx = e.scrollingDeltaX * (precise ? 1 : 12)
             let dy = e.scrollingDeltaY * (precise ? 1 : 12)
@@ -97,7 +104,7 @@ struct ArrangeView: View {
             }
             if abs(dx) > abs(dy) {
                 s.scrollX = max(0, s.scrollX - dx / s.pixelsPerSecond)
-                if s.isPlaying { s.followPlayhead = false }
+                if s.isPlaying { s.followSuspended = true }   // until the next play
                 return nil
             }
             return e

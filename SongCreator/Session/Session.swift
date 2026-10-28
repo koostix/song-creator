@@ -110,6 +110,8 @@ final class Session {
     @ObservationIgnored var clipboard: RegionClipboard?
     @ObservationIgnored private var gestureBase: Song?
     var showMixer = false
+    /// Scrolling by hand during playback pauses following until the next play.
+    var followSuspended = false
     var pixelsPerSecond: Double = 40
     var scrollX: Double = 0
     var timelineWidth: Double = 800 {
@@ -134,6 +136,9 @@ final class Session {
     private(set) var midiSources: [String] = []
     /// MIDI outputs for external instruments (refreshed when MIDI devices come and go).
     private(set) var midiDestinations: [MIDIDestination] = MIDIOutput.destinations()
+
+    /// Whether a track's external MIDI device is plugged in right now.
+    func isConnected(_ ext: ExternalMIDI) -> Bool { midiDestinations.contains { $0.id == ext.deviceID } }
 
     /// Make a MIDI track play outboard gear (nil goes back to its instrument).
     func setExternal(_ ext: ExternalMIDI?, on track: UUID) {
@@ -275,6 +280,7 @@ final class Session {
         rebuildEngine()
         startMIDI()
         loadWaveforms()
+        reportMissingAudio()
 
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
@@ -537,6 +543,15 @@ final class Session {
         scrollX = 0
     }
 
+    /// Recordings whose audio file is gone (moved or deleted in Finder) play as silence; say so.
+    private func reportMissingAudio() {
+        let files = Set(song.tracks.flatMap { $0.takes.compactMap(\.fileName) })
+        let missing = files.filter { !FileManager.default.fileExists(atPath: audioFolder.appendingPathComponent($0).path) }
+        guard !missing.isEmpty else { return }
+        message = "\(missing.count) recording\(missing.count == 1 ? " is" : "s are") missing from this song's Audio folder, so "
+            + "\(missing.count == 1 ? "it plays" : "they play") as silence. Put the file\(missing.count == 1 ? "" : "s") back to hear \(missing.count == 1 ? "it" : "them")."
+    }
+
     private func loadWaveforms() {
         for t in song.tracks { for take in t.takes { if let f = take.fileName { waveforms.load(f, folder: audioFolder) } } }
     }
@@ -700,7 +715,7 @@ final class Session {
         audio.meters.decay()
         guard isPlaying, let pos = transport.currentPosition() else { return }
         playhead.position = pos
-        if followPlayhead {
+        if followPlayhead && !followSuspended {
             let visible = timelineWidth / pixelsPerSecond
             if pos > scrollX + visible * 0.92 || pos < scrollX {
                 scrollX = max(0, pos - visible * 0.1)
@@ -719,6 +734,7 @@ final class Session {
     func play(from position: Double) {
         guard exportProgress == nil else { return }
         guard ensureRunning() else { return }
+        followSuspended = false
         playStart = position
         audio.applyAutomation(song, at: position)
         transport.start(PlayRequest(song: song, position: position, loop: loopRange))
@@ -777,6 +793,17 @@ final class Session {
     func startRecording() {
         guard exportProgress == nil else { message = "Wait for the mixdown to finish."; return }
         guard ensureRunning() else { return }
+        // Plenty of room? A few minutes of 96 kHz stereo is around 100 MB per track.
+        if let free = (try? audioFolder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage {
+            if free < 300_000_000 {
+                message = "Your disk is almost full (\(free / 1_000_000) MB free), so recording is off. Free up some space first."
+                return
+            }
+            if free < 2_000_000_000 {
+                message = "Disk space is getting low (\(free / 1_000_000) MB free). Recording, but free up some space soon."
+            }
+        }
         if !song.tracks.contains(where: \.armed) {
             edit { s in
                 if let id = selectedTrackID, let i = s.trackIndex(id) {
@@ -893,6 +920,10 @@ final class Session {
         var newSong = song
         var recordedTrackIDs: [UUID] = []
 
+        if let result, result.writeFailures > 0 {
+            message = "Part of this take couldn't be saved (\(result.writeFailures) write error\(result.writeFailures == 1 ? "" : "s")). "
+                + "Check that the disk has space."
+        }
         if let result {
             let fileStart = HostTime.seconds(result.firstHost) - anchor - inLat - outLat - offset
             let fileEnd = fileStart + Double(result.frames) / result.sampleRate
@@ -1036,6 +1067,10 @@ final class Session {
     }
 
     func deleteTrack(_ id: UUID) {
+        if isRecording, song.tracks.first(where: { $0.id == id })?.armed == true {
+            message = "That track is recording. Stop first, then delete it."
+            return
+        }
         edit { $0.tracks.removeAll { $0.id == id } }
         if selectedTrackID == id { selectedTrackID = nil }
     }

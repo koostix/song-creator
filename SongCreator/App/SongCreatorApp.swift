@@ -93,6 +93,7 @@ struct SongCreatorApp: App {
                     ProjectStore.clearTemplate()
                     model.session?.message = "New songs start from the plain one-track setup again."
                 }
+                .disabled(!ProjectStore.hasTemplate)
                 Divider()
                 Button("Show in Finder") {
                     if let url = model.session?.projectURL { NSWorkspace.shared.activateFileViewerSelecting([url]) }

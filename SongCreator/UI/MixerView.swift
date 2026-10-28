@@ -218,7 +218,8 @@ struct InsertSlots: View {
             // Fixed height in every strip so EQ, knobs and faders line up across the mixer.
             if track.kind == .midi {
                 if let ext = track.external {
-                    PluginRow(name: "⇄ \(ext.deviceName) ch\(ext.channel)", status: nil,
+                    PluginRow(name: "⇄ \(ext.deviceName) ch\(ext.channel)",
+                              status: session.isConnected(ext) ? nil : "\(ext.deviceName) isn't connected",
                               onOpen: {},
                               onRemove: { session.setExternal(nil, on: track.id) },
                               removeHelp: "Stop using the external MIDI device")

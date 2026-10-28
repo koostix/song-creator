@@ -17,6 +17,8 @@ final class Recorder {
         let frames: Int64
         let sampleRate: Double
         let targets: [Target]
+        /// Buffers that couldn't be written (disk full, say): the take has gaps.
+        let writeFailures: Int
     }
 
     static let peakFrames = 256
@@ -25,6 +27,7 @@ final class Recorder {
     private var targets: [Target] = []
     private var firstHost: UInt64?
     private var frames: Int64 = 0
+    private var writeFailures = 0
     private var sampleRate: Double = 48000
     private var livePeaks: [UUID: [Float]] = [:]
     private weak var meters: MeterStore?
@@ -109,6 +112,7 @@ final class Recorder {
         self.sampleRate = sampleRate
         firstHost = nil
         frames = 0
+        writeFailures = 0
         livePeaks = Dictionary(uniqueKeysWithValues: targets.map { ($0.trackID, []) })
         lock.unlock()
     }
@@ -118,7 +122,7 @@ final class Recorder {
     func finish() -> Result? {
         lock.lock(); defer { lock.unlock() }
         guard !targets.isEmpty else { return nil }
-        let r = firstHost.map { Result(firstHost: $0, frames: frames, sampleRate: sampleRate, targets: targets) }
+        let r = firstHost.map { Result(firstHost: $0, frames: frames, sampleRate: sampleRate, targets: targets, writeFailures: writeFailures) }
         targets = []
         livePeaks = [:]
         return r
@@ -164,7 +168,7 @@ final class Recorder {
                 let from = min(t.inputChannel + c, inCh - 1)
                 memcpy(dst[c], src[from], n * MemoryLayout<Float>.size)
             }
-            try? t.file.write(from: out)
+            do { try t.file.write(from: out) } catch { writeFailures += 1 }
 
             var peaks = livePeaks[t.trackID] ?? []
             var i = 0
