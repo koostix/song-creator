@@ -16,7 +16,8 @@ targets:
       path: SongCreator/App/Info.plist
       properties:
         CFBundleDisplayName: Song Creator
-        CFBundleShortVersionString: "1.0"
+        CFBundleShortVersionString: "1.0.0"
+        NSHumanReadableCopyright: "Copyright © 2026 Paul Shuler. MIT License."
         CFBundleVersion: "1"
         LSApplicationCategoryType: public.app-category.music
         NSMicrophoneUsageDescription: Song Creator records your instruments and vocals from your audio interface or microphone.

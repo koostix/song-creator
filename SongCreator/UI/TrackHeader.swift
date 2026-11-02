@@ -60,7 +60,7 @@ struct TrackHeader: View {
                                   color: session.monitoringMuted || !session.inputEnabled ? Color.orange : Theme.accent,
                                   help: !session.inputEnabled ? "Input monitoring (the audio input is switched off)"
                                     : session.monitoringMuted ? "Input monitoring is muted by feedback protection while sound plays through the speakers. Use headphones to hear yourself."
-                                    : "Input monitoring: hear this track's input through its effects and plugins") {
+                                    : "Input monitoring: while this track is armed, hear its input through its effects and plugins") {
                             session.updateTrack(track.id, undoable: false) { $0.monitor.toggle() }
                         }
                     }

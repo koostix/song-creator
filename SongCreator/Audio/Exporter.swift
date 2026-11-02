@@ -52,6 +52,9 @@ enum Exporter {
         let total = Int64(range.length * sr)
         // Small blocks when automating so volume/pan changes land within ~10 ms.
         let block: Int64 = song.tracks.contains(where: \.hasAutomation) ? 512 : Int64(buffer.frameCapacity)
+        // The file may run at a lower rate than the engine (AAC tops out at 48 kHz): convert, or it plays slow.
+        let converter = out.processingFormat.sampleRate == buffer.format.sampleRate
+            ? nil : AVAudioConverter(from: buffer.format, to: out.processingFormat)
         var done: Int64 = 0
         var stalls = 0
         while done < total {
@@ -60,7 +63,11 @@ enum Exporter {
             let n = AVAudioFrameCount(min(block, total - done))
             switch try engine.renderOffline(n, to: buffer) {
             case .success:
-                try out.write(from: buffer)
+                if let converter {
+                    try convert(buffer, with: converter, to: out)
+                } else {
+                    try out.write(from: buffer)
+                }
                 done += Int64(buffer.frameLength)
                 stalls = 0
             case .cannotDoInCurrentContext:
@@ -73,7 +80,30 @@ enum Exporter {
             }
             progress(Double(done) / Double(total))
         }
+        if let converter { try convert(nil, with: converter, to: out) }   // flush what the converter still holds
         for n in audio.tracks.values { n.player?.stop() }
         audio.allNotesOff()
+    }
+
+    /// Feed one rendered block (nil = end of stream) through a rate converter and write what comes out.
+    private static func convert(_ input: AVAudioPCMBuffer?, with converter: AVAudioConverter, to file: AVAudioFile) throws {
+        var pending = input
+        while true {
+            let capacity = AVAudioFrameCount(max(8192, Double(input?.frameLength ?? 0) * file.processingFormat.sampleRate / converter.inputFormat.sampleRate + 64))
+            guard let output = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: capacity) else { throw CocoaError(.fileWriteUnknown) }
+            var error: NSError?
+            let status = converter.convert(to: output, error: &error) { _, inputStatus in
+                if let block = pending {
+                    pending = nil
+                    inputStatus.pointee = .haveData
+                    return block
+                }
+                inputStatus.pointee = input == nil ? .endOfStream : .noDataNow
+                return nil
+            }
+            if let error { throw error }
+            if output.frameLength > 0 { try file.write(from: output) }
+            if status != .haveData { return }
+        }
     }
 }

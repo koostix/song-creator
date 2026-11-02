@@ -319,6 +319,46 @@ enum SelfTest {
         try tone("t1.caf", 440)
         try tone("t2.caf", 880)
 
+        // AAC tops out at 48 kHz, so mixdowns from a higher device rate must be converted, at the right speed.
+        if let spk = AudioDevices.all().first(where: { $0.uid == "BuiltInSpeakerDevice" }) {
+            let spkRate = AudioDevices.sampleRate(spk.id)
+            AudioDevices.setSampleRate(spk.id, 96000)
+            defer { AudioDevices.setSampleRate(spk.id, spkRate) }
+            let hi = AudioEngine()
+            hi.build(song: Song.newIdea(), inputDevice: nil, outputDevice: spk.id, inputEnabled: false)
+            let hiDir = dir.appendingPathComponent("HiRate")
+            try FileManager.default.createDirectory(at: hiDir.appendingPathComponent("Audio"), withIntermediateDirectories: true)
+            let hsr = hi.sampleRate
+            let hf = try Recorder.makeFile(url: hiDir.appendingPathComponent("Audio/tone.caf"), sampleRate: hsr, channels: 1)
+            let hn = AVAudioFrameCount(hsr * 2)
+            let hb = AVAudioPCMBuffer(pcmFormat: hf.processingFormat, frameCapacity: hn)!
+            hb.frameLength = hn
+            for i in 0..<Int(hn) { hb.floatChannelData![0][i] = Float(sin(2 * .pi * 440 * Double(i) / hsr) * 0.5) }
+            try hf.write(from: hb)
+            var hs = Song(name: "hi")
+            var ht = Track(name: "t")
+            let htake = Take(name: "t", fileName: "tone.caf", start: 0, duration: 2)
+            ht.takes = [htake]
+            ht.assign(takeID: htake.id, over: htake.range)
+            hs.tracks = [ht]
+            hi.sync(hs)
+            let ht2 = Transport(audio: hi, audioFolder: hiDir.appendingPathComponent("Audio"), song: hs)
+            let aac = hiDir.appendingPathComponent("mix.m4a")
+            try ht2.queue.sync {
+                try Exporter.render(audio: hi, transport: ht2, song: hs, range: TimeRange(start: 0, end: 2), to: aac, format: .aac) { _ in }
+            }
+            let af = try AVAudioFile(forReading: aac)
+            let secs = Double(af.length) / af.fileFormat.sampleRate
+            print(String(format: "  AAC from %.0f Hz: file %.0f Hz, %.3f s", hsr, af.fileFormat.sampleRate, secs))
+            try check(abs(secs - 2) < 0.1, "AAC mixdown from a 96 kHz device has the right length")
+            let ab = AVAudioPCMBuffer(pcmFormat: af.processingFormat, frameCapacity: AVAudioFrameCount(af.length))!
+            try af.read(into: ab)
+            let am = Mix(data: Array(UnsafeBufferPointer(start: ab.floatChannelData![0], count: Int(ab.frameLength))), sr: af.processingFormat.sampleRate)
+            let aw = am.window(0.5, 1.5)
+            try check(aw.rms > 0.1 && abs(aw.freq - 440) < 15, "and the right pitch (\(Int(aw.freq)) Hz)")
+            hi.shutdown()
+        }
+
         // 1. Comp across takes plus a MIDI note.
         var track = Track(name: "Vox")
         let t1 = Take(name: "Take 1", fileName: "t1.caf", start: 1, duration: 4)
@@ -713,7 +753,11 @@ enum SelfTest {
             defer { MIDIEndpointDispose(virtualDest); MIDIClientDispose(client) }
             var vid: Int32 = 0
             MIDIObjectGetIntegerProperty(virtualDest, kMIDIPropertyUniqueID, &vid)
-            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            // macOS publishes a new MIDI device asynchronously.
+            let listDeadline = Date().addingTimeInterval(3)
+            while Date() < listDeadline, !MIDIOutput.destinations().contains(where: { $0.id == vid }) {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
             try check(MIDIOutput.destinations().contains { $0.id == vid }, "MIDI outputs include the device")
 
             let extDir = dir.appendingPathComponent("ExternalSong")
@@ -772,6 +816,55 @@ enum SelfTest {
             var all = UserDefaults.standard.dictionary(forKey: "timelineView") ?? [:]
             all[zs.id.uuidString] = nil
             UserDefaults.standard.set(all, forKey: "timelineView")
+        }
+
+        print("Release checks")
+        do {
+            // Every saved field must survive a save and load (custom decoders can silently drop one).
+            var full = Song(name: "Full")
+            full.tempo = 91; full.beatsPerBar = 3; full.sampleRate = 48000; full.loop = TimeRange(start: 1, end: 2)
+            full.loopEnabled = true; full.punch = TimeRange(start: 3, end: 4); full.punchEnabled = true
+            full.clickEnabled = false; full.clickOnlyWhileRecording = true; full.clickVolume = 0.3; full.countInBars = 2
+            full.autoArm = .nextTrack; full.markers = [Marker(name: "M", position: 2)]
+            full.master = MasterSettings(volumeDB: -3, limiterOn: false, reverbRoom: .hall, reverbReturnDB: -1,
+                                         delayDivision: .eighth, delayFeedback: 12, delayReturnDB: -2)
+            var ft = Track(name: "T", kind: .midi, colorIndex: 2, channels: 1, inputChannel: 3, armed: true, mute: true, solo: true,
+                           showTakes: true, program: 5, monitor: true, autoRead: false, showAutomation: true, autoParam: .pan)
+            ft.strip = ChannelStrip(volumeDB: -1, pan: 0.2, eqOn: false, hpfOn: true, lowGain: 1, midGain: 2, midFreq: 900, highGain: 3,
+                                    compOn: true, compThreshold: -9, compMakeup: 5, reverbSend: 0.1, delaySend: 0.2)
+            ft.takes = [Take(name: "K", fileName: "f.caf", fileOffset: 0.5, start: 1, duration: 2, notes: [MIDINote(pitch: 60, velocity: 90, start: 0.1, duration: 0.2)])]
+            ft.comp = [CompSegment(takeID: ft.takes[0].id, start: 1, end: 2, offset: 0.25, fadeIn: 0.1, fadeOut: 0.2)]
+            ft.volumeAuto = [AutoPoint(time: 1, value: -2)]
+            ft.panAuto = [AutoPoint(time: 2, value: 0.5)]
+            ft.inserts = [PluginSlot(name: "P", manufacturer: "X", type: 1, subType: 2, manufacturerCode: 3, bypass: true, state: Data([9]))]
+            ft.instrument = PluginSlot(name: "I", manufacturer: "Y", type: 4, subType: 5, manufacturerCode: 6)
+            var ext = ExternalMIDI(deviceID: 7, deviceName: "D", channel: 9); ext.audioReturn = true; ext.latencyMs = 5
+            ft.external = ext
+            ft.quantize = Quantize(grid: .eighthTriplet, strength: 0.5, swing: 0.6)
+            full.tracks = [ft]
+            let round = try JSONDecoder().decode(Song.self, from: JSONEncoder().encode(full))
+            try check(round == full, "every saved field survives a save and load")
+            let sparse = try JSONDecoder().decode(Song.self, from: Data(#"{"name":"Old","future":1,"tracks":[{"name":"T","strip":{"pan":0.5},"takes":[{"start":1}]}],"master":{"reverbRoom":"from-the-future"}}"#.utf8))
+            try check(sparse.name == "Old" && sparse.tempo == 120 && sparse.tracks[0].strip.pan == 0.5 && sparse.tracks[0].strip.midFreq == 1000
+                      && sparse.tracks[0].takes[0].start == 1 && sparse.master.reverbRoom == .plate,
+                      "songs with missing or unknown fields still open")
+            try check(ProjectStore.sanitize(".hidden") == "hidden" && ProjectStore.sanitize("...") == "Untitled" && ProjectStore.sanitize("a/b") == "a-b",
+                      "names can't create hidden folders or paths")
+
+            // Only an armed track monitors; two audio tracks with I on must not both play the input.
+            let mdir2 = dir.appendingPathComponent("MonitorSong")
+            try FileManager.default.createDirectory(at: mdir2, withIntermediateDirectories: true)
+            let savedProtection = Prefs.feedbackProtection
+            Prefs.feedbackProtection = false
+            defer { Prefs.feedbackProtection = savedProtection }
+            let mon = Session(projectURL: mdir2, song: Song.newIdea())
+            mon.addTrack(kind: .audio)
+            let on = { (id: UUID) in mon.audio.tracks[id]?.monitorReader?.enabled.load(ordering: .relaxed) ?? false }
+            let firstID = mon.song.tracks[0].id, secondID = mon.song.tracks[1].id
+            try check(mon.song.tracks[1].monitor && !mon.song.tracks[1].armed && !on(secondID), "an unarmed track doesn't play the input")
+            if mon.audio.canMonitorInput { try check(on(firstID), "the armed track does") }
+            mon.close()
+            mon.close()   // closing twice is harmless
         }
 
         print("Usability")

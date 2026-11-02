@@ -651,11 +651,14 @@ struct LiveRecording: View {
                 ctx.fill(Path(roundedRect: rect, cornerRadius: 4), with: .color(Theme.record.opacity(0.25)))
                 let mid = size.height / 2, h = size.height / 2 - 5
                 var path = Path()
-                let peaks = Array(live.peaks)
+                let peaks = live.peaks
                 let perPx = max(1, Int(1 / (live.step * scale.pps)))
-                var i = 0
-                while i < peaks.count {
-                    let p = peaks[i..<min(peaks.count, i + perPx)].max() ?? 0
+                // Only what's on screen, so long takes stay cheap to draw.
+                var i = max(0, Int((scale.t(0) - live.songStart) / live.step)) / perPx * perPx
+                let last = min(peaks.count, Int((scale.t(size.width) - live.songStart) / live.step) + perPx)
+                while i < last {
+                    let from = peaks.startIndex + i
+                    let p = peaks[from..<min(peaks.endIndex, from + perPx)].max() ?? 0
                     let x = scale.x(live.songStart + Double(i) * live.step)
                     let v = CGFloat(pow(Double(min(1, p)), 0.7)) * h
                     path.move(to: CGPoint(x: x, y: mid - v))

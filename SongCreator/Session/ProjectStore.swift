@@ -85,7 +85,8 @@ enum ProjectStore {
 
     static func sanitize(_ name: String) -> String {
         let bad = CharacterSet(charactersIn: "/:\\?%*|\"<>")
-        let s = name.components(separatedBy: bad).joined(separator: "-").trimmingCharacters(in: .whitespaces)
+        var s = name.components(separatedBy: bad).joined(separator: "-").trimmingCharacters(in: .whitespaces)
+        while s.hasPrefix(".") { s = String(s.dropFirst()).trimmingCharacters(in: .whitespaces) }   // would hide the folder
         return s.isEmpty ? "Untitled" : s
     }
 

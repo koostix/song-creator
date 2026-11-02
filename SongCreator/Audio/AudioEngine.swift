@@ -104,7 +104,13 @@ final class AudioEngine {
     private(set) var engine = AVAudioEngine()
     private(set) var sampleRate: Double = 48000
     private(set) var stereo: AVAudioFormat!
-    private(set) var tracks: [UUID: TrackNodes] = [:]
+    /// Read from the transport and MIDI threads while the main thread adds and removes tracks, so it's locked.
+    private(set) var tracks: [UUID: TrackNodes] {
+        get { tracksLock.lock(); defer { tracksLock.unlock() }; return lockedTracks }
+        set { tracksLock.lock(); lockedTracks = newValue; tracksLock.unlock() }
+    }
+    private let tracksLock = NSLock()
+    private var lockedTracks: [UUID: TrackNodes] = [:]
 
     // Created fresh with each engine: audio units carry render state that doesn't move between engines.
     private(set) var masterMixer = AVAudioMixerNode()
@@ -709,7 +715,9 @@ final class AudioEngine {
             n.strip.destination(forMixer: reverbBus, bus: n.reverbBus)?.volume = Float(s.reverbSend)
             n.strip.destination(forMixer: delayBus, bus: n.delayBus)?.volume = Float(s.delaySend)
             // Gear coming back from a MIDI track isn't a mic, so feedback protection doesn't apply to it.
-            let wanted = track.kind == .audio ? track.monitor && !monitorMuted : n.monitorMode != .none
+            // Only the armed track listens: new tracks default to monitoring, and every unarmed one playing the
+            // same input as well would stack it up louder and louder.
+            let wanted = track.kind == .audio ? track.monitor && track.armed && !monitorMuted : n.monitorMode != .none
             n.monitorReader?.enabled.store(wanted && liveInput, ordering: .relaxed)
 
             n.eq.bypass = !s.eqOn && !s.hpfOn

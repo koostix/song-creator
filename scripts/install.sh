@@ -7,8 +7,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-xcodegen generate -q
-xcodebuild -project SongCreator.xcodeproj -scheme SongCreator -configuration Release -derivedDataPath build build -quiet
+# The Xcode project is checked in; regenerate it only if you have XcodeGen and changed project.yml.
+if command -v xcodegen >/dev/null; then xcodegen generate -q; fi
+# Universal, so it runs on Apple Silicon and Intel Macs.
+xcodebuild -project SongCreator.xcodeproj -scheme SongCreator -configuration Release -derivedDataPath build \
+    ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO build -quiet
 
 APP=build/Build/Products/Release/SongCreator.app
 codesign --force --deep --sign - -r='designated => identifier "com.paulshuler.SongCreator"' "$APP"

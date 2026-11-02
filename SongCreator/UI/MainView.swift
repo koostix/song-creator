@@ -53,7 +53,9 @@ struct MainView: View {
                 return nil
             }
             if let responder = NSApp.keyWindow?.firstResponder, responder is NSText { return event }
-            if NSApp.keyWindow?.attachedSheet != nil || showExport { return event }
+            if NSApp.keyWindow?.attachedSheet != nil || NSApp.modalWindow != nil || showExport { return event }
+            // Keys typed in the Settings window aren't for the song.
+            if let w = event.window, w.identifier?.rawValue.contains("Settings") == true || w.title.contains("Settings") { return event }
             let flags = event.modifierFlags.intersection([.command, .option, .shift, .control])
             if session.musicalTyping, flags.isEmpty,
                let ch = event.charactersIgnoringModifiers?.lowercased().first,
@@ -138,7 +140,7 @@ struct StatusBar: View {
                     .foregroundStyle(Theme.dim)
             }
             Spacer()
-            if session.monitoringMuted && session.song.tracks.contains(where: { $0.monitor && $0.kind == .audio }) {
+            if session.monitoringMuted && session.song.tracks.contains(where: { $0.monitor && $0.armed && $0.kind == .audio }) {
                 Label("Monitoring muted: speakers", systemImage: "speaker.slash.fill")
                     .foregroundStyle(Color.orange)
                     .help("Feedback protection: your input isn't played back while sound comes out of the computer's speakers. Plug in headphones to hear yourself, or turn protection off in Settings.")
@@ -318,6 +320,7 @@ struct TransportButton: View {
         }
         .buttonStyle(.plain)
         .help(help)
+        .accessibilityLabel(help)
     }
 }
 

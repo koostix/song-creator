@@ -57,7 +57,10 @@ struct ProjectBrowser: View {
         }
         .background(Theme.background)
         .preferredColorScheme(.dark)
-        .onAppear { model.refresh() }
+        .onAppear {
+            model.refresh()
+            if case .project(let p) = filter, !library.projects.contains(p) { filter = .all }   // removed in Finder
+        }
         .onChange(of: filter) { _, f in
             Prefs.libraryProject = { if case .project(let p) = f { return p } else { return nil } }()
             ProjectBrowser.savedFilter = f

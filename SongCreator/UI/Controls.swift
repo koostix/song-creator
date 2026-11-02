@@ -42,6 +42,8 @@ struct LitButton: View {
         }
         .buttonStyle(.plain)
         .help(help)
+        .accessibilityLabel(help.isEmpty ? label : help)
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 

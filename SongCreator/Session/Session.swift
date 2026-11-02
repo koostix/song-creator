@@ -180,7 +180,7 @@ final class Session {
 
     @ObservationIgnored let audio = AudioEngine()
     @ObservationIgnored let recorder = Recorder()
-    @ObservationIgnored let midi = MIDIInput()
+    @ObservationIgnored let midi = MIDIInput.shared
     @ObservationIgnored private(set) var transport: Transport!
     // Observed so the Undo/Redo menu items and buttons enable themselves.
     private var undoStack: [Song] = []
@@ -256,6 +256,8 @@ final class Session {
         return loop.start + max(1, whole) * loop.length
     }
 
+    var hasAudioRecordings: Bool { song.tracks.contains { $0.takes.contains { $0.fileName != nil } } }
+
     /// True when pressing record now would start a JAM pass.
     var jamReady: Bool { jamMode && song.loopEnabled && song.loop.isValid }
 
@@ -315,6 +317,8 @@ final class Session {
         if let deviceListObserver { NotificationCenter.default.removeObserver(deviceListObserver) }
         saveNow()
         PluginWindows.closeAll()
+        midi.detach(owner: self)
+        recorder.stop()
         audio.shutdown()
         audio.destroyAggregate()
     }
@@ -379,8 +383,7 @@ final class Session {
     /// explains why recording is off.
     private func alignSampleRates(input: AudioDeviceID?, output: AudioDeviceID?) {
         guard let output else { return }
-        let hasRecordings = song.tracks.contains { $0.takes.contains { $0.fileName != nil } }
-        if song.sampleRate > 0, hasRecordings, AudioDevices.sampleRate(output) != song.sampleRate {
+        if song.sampleRate > 0, hasAudioRecordings, AudioDevices.sampleRate(output) != song.sampleRate {
             AudioDevices.setSampleRate(output, song.sampleRate)
         }
         let target = AudioDevices.sampleRate(output)
@@ -391,7 +394,7 @@ final class Session {
 
     /// Re-check whether sound goes to the laptop speakers (and so whether monitoring must be muted).
     func updateMonitorSafety() {
-        onSpeakers = audio.outputDeviceID.map(AudioDevices.isBuiltInSpeakers) ?? false
+        onSpeakers = audio.outputDeviceID.map(AudioDevices.playsIntoRoom) ?? false
         audio.monitorMuted = monitoringMuted
         audio.applyParameters(song)
     }
@@ -440,16 +443,17 @@ final class Session {
     }
 
     private func startMIDI() {
-        midi.sourcesChanged = { [weak self] in
+        midi.attach(owner: self, onEvent: { [weak self] status, d1, d2, ts in
+            self?.handleMIDI(status, d1, d2, ts)
+        }, sourcesChanged: { [weak self] in
             DispatchQueue.main.async {
                 self?.midiSources = self?.midi.sourceNames ?? []
                 self?.midiDestinations = MIDIOutput.destinations()
             }
+        })
+        if !midi.isConnected {
+            message = "MIDI isn't available right now. Quit and reopen Song Creator to use MIDI devices."
         }
-        midi.onEvent = { [weak self] status, d1, d2, ts in
-            self?.handleMIDI(status, d1, d2, ts)
-        }
-        midi.start()
     }
 
     /// Incoming notes from hardware or the computer keyboard: play armed MIDI tracks (or, if none are
@@ -559,7 +563,16 @@ final class Session {
     // MARK: - Song changes, undo, save
 
     private func songDidChange(from old: Song) {
-        audio.sync(song)
+        // Rewiring tracks waits for the transport's current chunk, so it can't schedule onto a removed player.
+        func wiring(_ s: Song) -> [String] {
+            s.tracks.map { "\($0.id)\($0.kind)\($0.channels)\($0.inputChannel)\($0.instrument?.id.uuidString ?? "")\($0.external?.audioReturn == true)" }
+        }
+        if wiring(old) != wiring(song) {
+            let current = song
+            transport.queue.sync { audio.sync(current) }
+        } else {
+            audio.sync(song)
+        }
         transport.update(song: playbackSong)
         midiLock.lock()
         armedMIDI = song.tracks.filter { $0.kind == .midi && $0.armed }.map(\.id)
@@ -745,9 +758,11 @@ final class Session {
         guard isPlaying else { return }
         let stoppedAt = transport.currentPosition() ?? playhead.position
         isPlaying = false
-        if isRecording { finishRecording() }
+        let wasRecording = isRecording
+        if wasRecording { finishRecording() }
         transport.stop()
         playhead.position = returnOnStop ? playStart : max(0, stoppedAt)
+        if wasRecording { deviceChanged() }   // a device change that arrived during the take was held back
     }
 
     /// Restart from the current position so edits take effect immediately.
@@ -824,7 +839,15 @@ final class Session {
             message = "Input and output sample rates differ. Set them to the same rate in Audio MIDI Setup."
             return
         }
-        if song.sampleRate == 0 { song.sampleRate = audio.sampleRate }
+        // Audio files only play at the song's rate, so a take at another rate would be silent.
+        if hasAudioRecordings {
+            if !audioTracks.isEmpty, song.sampleRate != audio.sampleRate {
+                message = "This song is at \(Int(song.sampleRate)) Hz and your device can't switch from \(Int(audio.sampleRate)) Hz, so a new take wouldn't play. Pick a device that supports \(Int(song.sampleRate)) Hz."
+                return
+            }
+        } else if song.sampleRate != audio.sampleRate {
+            song.sampleRate = audio.sampleRate
+        }
 
         let stamp = Int(Date().timeIntervalSince1970)
         var targets: [Recorder.Target] = []
@@ -1233,8 +1256,9 @@ final class Session {
     }
 
     func importAudio(_ urls: [URL]) {
-        let sr = audio.sampleRate
-        if song.sampleRate == 0 { song.sampleRate = sr }
+        // Imports are converted to the song's rate so they play alongside what's already recorded.
+        let sr = hasAudioRecordings && song.sampleRate > 0 ? song.sampleRate : audio.sampleRate
+        if song.sampleRate != sr { song.sampleRate = sr }
         let at = playhead.position
         DispatchQueue.global(qos: .userInitiated).async { [audioFolder] in
             var imported: [(String, Double, Int, String)] = []

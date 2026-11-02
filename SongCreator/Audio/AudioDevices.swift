@@ -81,6 +81,14 @@ enum AudioDevices {
         return (name(id) ?? "").localizedCaseInsensitiveContains("speaker")
     }
 
+    /// True when the output plays out loud where a live mic can hear it: the computer's speakers, or a
+    /// display or AirPlay speaker (which are never headphones). USB and Bluetooth outputs could be either.
+    static func playsIntoRoom(_ id: AudioDeviceID) -> Bool {
+        if isBuiltInSpeakers(id) { return true }
+        let t = transportType(id)
+        return t == kAudioDeviceTransportTypeHDMI || t == kAudioDeviceTransportTypeDisplayPort || t == kAudioDeviceTransportTypeAirPlay
+    }
+
     /// Call `handler` on the main queue whenever `selector` changes on `id`. Returns a token for `removeListener`.
     static func addListener(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector,
                             scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,

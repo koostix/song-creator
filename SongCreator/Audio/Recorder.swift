@@ -70,6 +70,11 @@ final class Recorder {
         return tunerSamples
     }
 
+    func stop() {
+        pullTimer?.cancel()
+        pullTimer = nil
+    }
+
     // MARK: - Own hardware connection: read the input ring off the audio thread
 
     private var pullTimer: DispatchSourceTimer?
@@ -170,16 +175,15 @@ final class Recorder {
             }
             do { try t.file.write(from: out) } catch { writeFailures += 1 }
 
-            var peaks = livePeaks[t.trackID] ?? []
+            // Appended in place: copying the whole array for every buffer gets slow on long takes.
             var i = 0
             while i < n {
                 let len = min(Recorder.peakFrames, n - i)
                 var p: Float = 0
                 vDSP_maxmgv(dst[0] + i, 1, &p, vDSP_Length(len))
-                peaks.append(p)
+                livePeaks[t.trackID, default: []].append(p)
                 i += len
             }
-            livePeaks[t.trackID] = peaks
         }
         frames += Int64(n)
     }

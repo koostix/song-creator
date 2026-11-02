@@ -449,3 +449,74 @@ extension Track {
         quantize = try c.decodeIfPresent(Quantize.self, forKey: .quantize)
     }
 }
+
+extension Take {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Take"
+        fileName = try c.decodeIfPresent(String.self, forKey: .fileName)
+        fileOffset = try c.decodeIfPresent(Double.self, forKey: .fileOffset) ?? 0
+        start = try c.decodeIfPresent(Double.self, forKey: .start) ?? 0
+        duration = try c.decodeIfPresent(Double.self, forKey: .duration) ?? 0
+        notes = try c.decodeIfPresent([MIDINote].self, forKey: .notes) ?? []
+    }
+}
+
+extension ChannelStrip {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = ChannelStrip()
+        volumeDB = try c.decodeIfPresent(Double.self, forKey: .volumeDB) ?? d.volumeDB
+        pan = try c.decodeIfPresent(Double.self, forKey: .pan) ?? d.pan
+        eqOn = try c.decodeIfPresent(Bool.self, forKey: .eqOn) ?? d.eqOn
+        hpfOn = try c.decodeIfPresent(Bool.self, forKey: .hpfOn) ?? d.hpfOn
+        lowGain = try c.decodeIfPresent(Double.self, forKey: .lowGain) ?? d.lowGain
+        midGain = try c.decodeIfPresent(Double.self, forKey: .midGain) ?? d.midGain
+        midFreq = try c.decodeIfPresent(Double.self, forKey: .midFreq) ?? d.midFreq
+        highGain = try c.decodeIfPresent(Double.self, forKey: .highGain) ?? d.highGain
+        compOn = try c.decodeIfPresent(Bool.self, forKey: .compOn) ?? d.compOn
+        compThreshold = try c.decodeIfPresent(Double.self, forKey: .compThreshold) ?? d.compThreshold
+        compMakeup = try c.decodeIfPresent(Double.self, forKey: .compMakeup) ?? d.compMakeup
+        reverbSend = try c.decodeIfPresent(Double.self, forKey: .reverbSend) ?? d.reverbSend
+        delaySend = try c.decodeIfPresent(Double.self, forKey: .delaySend) ?? d.delaySend
+    }
+}
+
+extension MasterSettings {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = MasterSettings()
+        volumeDB = try c.decodeIfPresent(Double.self, forKey: .volumeDB) ?? d.volumeDB
+        limiterOn = try c.decodeIfPresent(Bool.self, forKey: .limiterOn) ?? d.limiterOn
+        reverbRoom = (try? c.decodeIfPresent(ReverbRoom.self, forKey: .reverbRoom)) ?? d.reverbRoom
+        reverbReturnDB = try c.decodeIfPresent(Double.self, forKey: .reverbReturnDB) ?? d.reverbReturnDB
+        delayDivision = (try? c.decodeIfPresent(DelayDivision.self, forKey: .delayDivision)) ?? d.delayDivision
+        delayFeedback = try c.decodeIfPresent(Double.self, forKey: .delayFeedback) ?? d.delayFeedback
+        delayReturnDB = try c.decodeIfPresent(Double.self, forKey: .delayReturnDB) ?? d.delayReturnDB
+    }
+}
+
+extension Song {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Song(name: "")
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Untitled"
+        tempo = try c.decodeIfPresent(Double.self, forKey: .tempo) ?? d.tempo
+        beatsPerBar = try c.decodeIfPresent(Int.self, forKey: .beatsPerBar) ?? d.beatsPerBar
+        sampleRate = try c.decodeIfPresent(Double.self, forKey: .sampleRate) ?? d.sampleRate
+        tracks = try c.decodeIfPresent([Track].self, forKey: .tracks) ?? []
+        markers = try c.decodeIfPresent([Marker].self, forKey: .markers) ?? []
+        loop = try c.decodeIfPresent(TimeRange.self, forKey: .loop) ?? d.loop
+        loopEnabled = try c.decodeIfPresent(Bool.self, forKey: .loopEnabled) ?? d.loopEnabled
+        punch = try c.decodeIfPresent(TimeRange.self, forKey: .punch) ?? d.punch
+        punchEnabled = try c.decodeIfPresent(Bool.self, forKey: .punchEnabled) ?? d.punchEnabled
+        clickEnabled = try c.decodeIfPresent(Bool.self, forKey: .clickEnabled) ?? d.clickEnabled
+        clickOnlyWhileRecording = try c.decodeIfPresent(Bool.self, forKey: .clickOnlyWhileRecording) ?? d.clickOnlyWhileRecording
+        clickVolume = try c.decodeIfPresent(Double.self, forKey: .clickVolume) ?? d.clickVolume
+        countInBars = try c.decodeIfPresent(Int.self, forKey: .countInBars) ?? d.countInBars
+        autoArm = (try? c.decodeIfPresent(AutoArmMode.self, forKey: .autoArm)) ?? d.autoArm
+        master = try c.decodeIfPresent(MasterSettings.self, forKey: .master) ?? d.master
+    }
+}

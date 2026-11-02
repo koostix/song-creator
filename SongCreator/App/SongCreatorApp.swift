@@ -16,6 +16,8 @@ final class AppModel {
     /// Start a new song, inside `project` if one is given.
     func newSong(in project: String? = nil) {
         let song = ProjectStore.newSong()
+        // The remembered project may have been removed in the meantime.
+        let project = project.flatMap { library.projects.contains($0) ? $0 : nil }
         do {
             let url = try ProjectStore.create(song, in: SongLibrary.folder(for: project))
             open(url: url, song: song)
@@ -51,6 +53,7 @@ struct SongCreatorApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
 
     init() {
+        MIDIInput.connectAtLaunch()
         Diagnostics.runIfRequested()
         SmokeTest.runIfRequested()
         PluginTest.runIfRequested()
