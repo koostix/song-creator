@@ -11,12 +11,24 @@ struct MainView: View {
         VStack(spacing: 0) {
             TransportBar(session: session)
             Divider().overlay(Color.black)
-            ArrangeView(session: session)
-            if session.showMixer {
-                Divider().overlay(Color.black)
+            if session.showMixer && session.mixerFull {
+                MixerBar(session: session, maxHeight: .infinity)
                 MixerView(session: session)
-                    .frame(height: 508)
-                    .transition(.move(edge: .bottom))
+                    .frame(maxHeight: .infinity)
+            } else {
+                GeometryReader { geo in
+                    // The tracks keep at least this much room under a tall mixer.
+                    let maxHeight = max(Session.minMixerHeight, geo.size.height - 160)
+                    VStack(spacing: 0) {
+                        ArrangeView(session: session)
+                        if session.showMixer {
+                            MixerBar(session: session, maxHeight: maxHeight)
+                            MixerView(session: session)
+                                .frame(height: min(session.mixerHeight, maxHeight))
+                                .transition(.move(edge: .bottom))
+                        }
+                    }
+                }
             }
             StatusBar(session: session)
         }
@@ -99,7 +111,17 @@ struct MainView: View {
             case "s": s.forSelectedTracks(fallback: selected) { $0.solo.toggle() }
             case "a": s.toggleArmSelected(fallback: selected)
             case "t": s.addTrack(kind: shift ? .midi : .audio)
-            case "x": withAnimation(.easeOut(duration: 0.15)) { s.showMixer.toggle() }
+            case "x":
+                withAnimation(.easeOut(duration: 0.15)) {
+                    if shift {
+                        // ⇧X: the mixer fills the window, or goes back under the tracks.
+                        s.mixerFull = !(s.showMixer && s.mixerFull)
+                        s.showMixer = true
+                    } else {
+                        s.showMixer.toggle()
+                        if !s.showMixer { s.mixerFull = false }
+                    }
+                }
             case "z": s.zoomToFit()
             case "=", "+": s.pixelsPerSecond = min(800, s.pixelsPerSecond * 1.25)
             case "-": s.pixelsPerSecond = max(4, s.pixelsPerSecond / 1.25)

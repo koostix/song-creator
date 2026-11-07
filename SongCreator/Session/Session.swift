@@ -129,6 +129,18 @@ final class Session {
     @ObservationIgnored var clipboard: RegionClipboard?
     @ObservationIgnored private var gestureBase: Song?
     var showMixer = false
+    /// The mixer fills the window, hiding the tracks (⇧X), so long effect chains have room.
+    var mixerFull = false
+    /// Height of the mixer under the tracks, remembered for every song. Taller shows more effect slots.
+    var mixerHeight: CGFloat = Session.savedMixerHeight {
+        didSet { UserDefaults.standard.set(Double(mixerHeight), forKey: "mixerHeight") }
+    }
+    static let defaultMixerHeight: CGFloat = 508
+    static let minMixerHeight: CGFloat = 260
+    private static var savedMixerHeight: CGFloat {
+        let h = CGFloat(UserDefaults.standard.double(forKey: "mixerHeight"))
+        return h == 0 ? defaultMixerHeight : max(h, minMixerHeight)
+    }
     /// Scrolling by hand during playback pauses following until the next play.
     var followSuspended = false
     var pixelsPerSecond: Double = 40
@@ -1454,13 +1466,14 @@ final class Session {
         stop()
         let base = song
         let folder = ProjectStore.bouncesFolder(projectURL)
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
-            .replacingOccurrences(of: ":", with: ".")
+        let stamp = Session.mixdownStamp(Date())
         var jobs: [(Song, URL)] = []
-        let mixName = ProjectStore.sanitize("\(base.name) mix \(stamp)")
-        jobs.append((base, folder.appendingPathComponent(mixName).appendingPathExtension(format.ext)))
+        let mixURL = Session.unusedURL(folder.appendingPathComponent(ProjectStore.sanitize("\(base.name) mix \(stamp)")),
+                                       ext: format.ext)
+        jobs.append((base, mixURL))
         if stems {
-            let stemFolder = folder.appendingPathComponent(ProjectStore.sanitize("\(base.name) stems \(stamp)"))
+            let stemName = ProjectStore.sanitize("\(base.name) stems \(stamp)")
+            let stemFolder = Session.unusedURL(folder.appendingPathComponent(stemName), ext: nil)
             try? FileManager.default.createDirectory(at: stemFolder, withIntermediateDirectories: true)
             for (i, t) in base.tracks.enumerated() where !t.comp.isEmpty && !t.mute {
                 var s = base
@@ -1499,6 +1512,29 @@ final class Session {
                 }
             }
         }
+    }
+
+    /// Date and time for mixdown names, e.g. "2026-11-07 5.48 PM": the date sorts in order, and ":" can't be in
+    /// a file name.
+    static func mixdownStamp(_ date: Date) -> String {
+        let day = DateFormatter()
+        day.locale = Locale(identifier: "en_US_POSIX")
+        day.dateFormat = "yyyy-MM-dd"
+        let time = DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .short)
+            .replacingOccurrences(of: ":", with: ".")
+            .replacingOccurrences(of: "\u{202F}", with: " ")   // the narrow space before AM/PM
+        return "\(day.string(from: date)) \(time)"
+    }
+
+    /// `base` with the extension, or "base 2", "base 3"… if that's taken (two mixdowns in the same minute).
+    static func unusedURL(_ base: URL, ext: String?) -> URL {
+        func url(_ n: Int) -> URL {
+            let u = n == 1 ? base : base.deletingLastPathComponent().appendingPathComponent("\(base.lastPathComponent) \(n)")
+            return ext.map { u.appendingPathExtension($0) } ?? u
+        }
+        var n = 1
+        while FileManager.default.fileExists(atPath: url(n).path) { n += 1 }
+        return url(n)
     }
 
     /// Default mixdown range: the whole song plus a reverb tail.

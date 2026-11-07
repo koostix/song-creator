@@ -21,8 +21,9 @@ A native macOS multitrack recorder for getting a song down in one sitting: recor
 - Regions with split, copy, paste, duplicate, fades and automatic crossfades
 - Loop and punch ranges you can drag, section markers, undo and redo
 - A channel strip on every track (EQ, compressor, reverb and delay sends), plus Audio Unit effects
+- A resizable mixer (drag its top edge, or ⇧X to fill the window) that shows more effects as it grows
 - Volume automation lanes and a master limiter
-- Offline mixdown to WAV (16 or 24 bit) or AAC
+- Offline mixdown to WAV (16 or 24 bit) or AAC, named with the date and time
 
 **Song management**
 - A song list with projects and multi-select
@@ -61,7 +62,7 @@ Press `T` to add an audio track, `A` to arm it, then `R` to record and `R` again
 | ⇧M | Add section marker | A M S | Arm / mute / solo track |
 | B | Split at playhead | ⌘C ⌘V ⌘D | Copy / paste / duplicate regions |
 | T / ⇧T | New audio / MIDI track | Z | Zoom to fit |
-| ⌘K | Computer keyboard as MIDI | X | Mixer |
+| ⌘K | Computer keyboard as MIDI | X / ⇧X | Mixer / mixer fills the window |
 | ⌘E | Export mixdown | = / − | Zoom in / out (or pinch, ⌘-scroll) |
 | ⌫ | Delete selected regions | Esc | Clear selection |
 | ⌘Z ⇧⌘Z | Undo / redo | Tab | While renaming: next track |

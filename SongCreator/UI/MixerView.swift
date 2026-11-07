@@ -3,20 +3,78 @@ import SwiftUI
 struct MixerView: View {
     @Bindable var session: Session
 
+    /// Strips are never shorter than this; a shorter mixer scrolls. Extra height goes to the effect slots.
+    static let minStripHeight: CGFloat = Session.defaultMixerHeight - 12
+
     var body: some View {
-        ScrollView([.horizontal, .vertical]) {
-            HStack(alignment: .top, spacing: 2) {
-                ForEach(session.song.tracks) { track in
-                    ChannelStripView(session: session, track: track)
+        GeometryReader { geo in
+            ScrollView([.horizontal, .vertical]) {
+                HStack(alignment: .top, spacing: 2) {
+                    ForEach(session.song.tracks) { track in
+                        ChannelStripView(session: session, track: track)
+                    }
+                    Spacer(minLength: 12)
+                    ReturnsStrip(session: session)
+                    MasterStrip(session: session)
                 }
-                Spacer(minLength: 12)
-                ReturnsStrip(session: session)
-                MasterStrip(session: session)
+                .frame(height: max(MixerView.minStripHeight, geo.size.height - 12))
+                .padding(6)
             }
-            .padding(6)
         }
         .background(Theme.background)
         .environment(\.continuousEdit, session.continuousEdit)
+    }
+}
+
+/// The mixer's top edge: drag to resize it, double-click (or the button) to fill the window.
+struct MixerBar: View {
+    @Bindable var session: Session
+    /// Tallest the mixer may get under the tracks.
+    let maxHeight: CGFloat
+    @State private var startHeight: CGFloat?
+    @State private var hover = false
+
+    private var full: Bool { session.mixerFull }
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(Color.black)
+            Capsule().fill(hover || startHeight != nil ? Theme.accent.opacity(0.8) : Theme.dim.opacity(0.5))
+                .frame(width: 36, height: 3)
+                .opacity(full ? 0 : 1)
+            HStack {
+                Spacer()
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) { session.mixerFull.toggle() }
+                } label: {
+                    Image(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.dim)
+                        .frame(width: 22, height: 12)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(full ? "Put the mixer back under the tracks (⇧X)" : "Mixer fills the window (⇧X)")
+                .padding(.trailing, 8)
+            }
+        }
+        .frame(height: 12)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            guard !full else { return }
+            hover = inside
+            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+            .onChanged { v in
+                guard !full else { return }
+                let start = startHeight ?? min(session.mixerHeight, maxHeight)
+                startHeight = start
+                session.mixerHeight = min(maxHeight, max(Session.minMixerHeight, (start - v.translation.height).rounded()))
+            }
+            .onEnded { _ in startHeight = nil })
+        .onTapGesture(count: 2) { withAnimation(.easeOut(duration: 0.15)) { session.mixerFull.toggle() } }
+        .help(full ? "Double-click to put the mixer back under the tracks"
+                   : "Drag to resize the mixer, double-click to fill the window")
     }
 }
 
@@ -95,6 +153,7 @@ struct ChannelStripView: View {
         }
         .padding(.bottom, 6)
         .frame(width: 92)
+        .frame(maxHeight: .infinity, alignment: .top)
         .background(Theme.panel)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .onTapGesture { session.selectedTrackID = id }
@@ -132,6 +191,7 @@ struct ReturnsStrip: View {
         }
         .padding(.bottom, 6)
         .frame(width: 120)
+        .frame(maxHeight: .infinity)
         .background(Theme.panel)
         .clipShape(RoundedRectangle(cornerRadius: 4))
     }
@@ -203,76 +263,115 @@ struct PluginRow: View {
 }
 
 /// The track's plugins: a MIDI track's instrument first, then its effects after the built-in EQ and compressor.
+/// Takes the strip's spare height, so a taller mixer shows more of a long effect chain.
 struct InsertSlots: View {
     @Bindable var session: Session
     let track: Track
 
-    static let rows = 3
-    static let height: CGFloat = CGFloat(rows) * 18 + 14
+    static let rowHeight: CGFloat = 18
+    /// Three rows and the "+ Insert" line: the size at the default mixer height.
+    static let minHeight: CGFloat = 3 * rowHeight + 14
 
-    /// Effect rows that fit after the instrument row (MIDI tracks) in the fixed-height area.
-    private var visibleInserts: Int { InsertSlots.rows - (track.kind == .midi ? 1 : 0) }
+    /// How many plugin rows fit in `height`, and how many of the effects to show in them.
+    static func layout(height: CGFloat, instrument: Bool, inserts: Int) -> (effects: Int, more: Int) {
+        let rows = max(1, Int((height - 14) / rowHeight))
+        let slots = rows - (instrument ? 1 : 0)
+        if inserts <= slots { return (inserts, 0) }
+        let shown = max(0, slots - 1)          // the last row says how many more there are
+        return (shown, inserts - shown)
+    }
 
     var body: some View {
-        VStack(spacing: 2) {
-            // Fixed height in every strip so EQ, knobs and faders line up across the mixer.
-            if track.kind == .midi {
-                if let ext = track.external {
-                    PluginRow(name: "⇄ \(ext.deviceName) ch\(ext.channel)",
-                              status: session.isConnected(ext) ? nil : "\(ext.deviceName) isn't connected",
-                              onOpen: {},
-                              onRemove: { session.setExternal(nil, on: track.id) },
-                              removeHelp: "Stop using the external MIDI device")
-                        .help("Plays outboard gear over MIDI\(ext.audioReturn ? ", heard back through this strip" : "")")
-                } else if let inst = track.instrument {
-                    PluginRow(name: inst.name, status: session.pluginStatus(inst),
-                              onOpen: { session.openEditor(inst, track: track) },
-                              onRemove: { session.setInstrument(nil, on: track.id) },
-                              removeHelp: "Remove — go back to the built-in sounds")
-                } else {
-                    HStack(spacing: 3) {
-                        Image(systemName: "pianokeys").font(.system(size: 8))
-                        Text(GMPrograms.name(track.program)).font(.system(size: 9, weight: .medium)).lineLimit(1)
-                        Spacer(minLength: 0)
-                    }
-                    .foregroundStyle(Theme.dim)
-                    .padding(.horizontal, 4).frame(height: 16)
-                    .help("Built-in sound — change it in the track header")
-                }
+        GeometryReader { geo in
+            let fit = InsertSlots.layout(height: geo.size.height, instrument: track.kind == .midi, inserts: track.inserts.count)
+            VStack(spacing: 2) {
+                if track.kind == .midi { instrumentRow }
+                ForEach(track.inserts.prefix(fit.effects)) { slot in effectRow(slot) }
+                if fit.more > 0 { moreRow(fit.more) }
+                addMenu
             }
-            ForEach(track.inserts.prefix(visibleInserts)) { slot in
-                PluginRow(name: slot.name, status: session.pluginStatus(slot), bypassed: slot.bypass,
-                          onBypass: { session.toggleBypass(slot.id, in: track.id) },
-                          onOpen: { session.openEditor(slot, track: track) },
-                          onRemove: { session.removeInsert(slot.id, from: track.id) })
-                    .contextMenu {
-                        Button("Open Editor") { session.openEditor(slot, track: track) }
-                        Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: track.id) }
-                        Button("Move Up") { session.moveInsert(slot.id, in: track.id, by: -1) }
-                        Button("Move Down") { session.moveInsert(slot.id, in: track.id, by: 1) }
-                        Divider()
-                        Button("Remove") { session.removeInsert(slot.id, from: track.id) }
-                    }
-            }
-            if track.inserts.count > visibleInserts {
-                Text("+\(track.inserts.count - visibleInserts) more in FX")
-                    .font(.system(size: 8, weight: .medium)).foregroundStyle(Theme.dim)
-                    .help("The track's FX button lists every plugin")
-            }
-            Menu {
-                ForEach(PluginCatalog.grouped(PluginCatalog.effects), id: \.0) { group in
-                    Menu(group.0) {
-                        ForEach(group.1) { info in
-                            Button(info.name) { session.addInsert(info, to: track.id) }
-                        }
-                    }
-                }
-            } label: {
-                Text("+ Insert").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.dim)
-            }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .padding(.horizontal, 4)
+            .frame(width: geo.size.width, alignment: .top)
         }
-        .padding(.horizontal, 4)
-        .frame(height: InsertSlots.height, alignment: .top)
+        .frame(minHeight: InsertSlots.minHeight, maxHeight: .infinity)
+    }
+
+    @ViewBuilder private var instrumentRow: some View {
+        if let ext = track.external {
+            PluginRow(name: "⇄ \(ext.deviceName) ch\(ext.channel)",
+                      status: session.isConnected(ext) ? nil : "\(ext.deviceName) isn't connected",
+                      onOpen: {},
+                      onRemove: { session.setExternal(nil, on: track.id) },
+                      removeHelp: "Stop using the external MIDI device")
+                .help("Plays outboard gear over MIDI\(ext.audioReturn ? ", heard back through this strip" : "")")
+        } else if let inst = track.instrument {
+            PluginRow(name: inst.name, status: session.pluginStatus(inst),
+                      onOpen: { session.openEditor(inst, track: track) },
+                      onRemove: { session.setInstrument(nil, on: track.id) },
+                      removeHelp: "Remove — go back to the built-in sounds")
+        } else {
+            HStack(spacing: 3) {
+                Image(systemName: "pianokeys").font(.system(size: 8))
+                Text(GMPrograms.name(track.program)).font(.system(size: 9, weight: .medium)).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Theme.dim)
+            .padding(.horizontal, 4).frame(height: 16)
+            .help("Built-in sound — change it in the track header")
+        }
+    }
+
+    private func effectRow(_ slot: PluginSlot) -> some View {
+        PluginRow(name: slot.name, status: session.pluginStatus(slot), bypassed: slot.bypass,
+                  onBypass: { session.toggleBypass(slot.id, in: track.id) },
+                  onOpen: { session.openEditor(slot, track: track) },
+                  onRemove: { session.removeInsert(slot.id, from: track.id) })
+            .contextMenu {
+                Button("Open Editor") { session.openEditor(slot, track: track) }
+                Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: track.id) }
+                Button("Move Up") { session.moveInsert(slot.id, in: track.id, by: -1) }
+                Button("Move Down") { session.moveInsert(slot.id, in: track.id, by: 1) }
+                Divider()
+                Button("Remove") { session.removeInsert(slot.id, from: track.id) }
+            }
+    }
+
+    /// Stands in for the effects that don't fit: click to give the mixer the whole window.
+    @ViewBuilder private func moreRow(_ count: Int) -> some View {
+        let label = Text("+\(count) more").font(.system(size: 9, weight: .semibold))
+        if session.mixerFull {
+            label.foregroundStyle(Theme.dim).frame(height: 16)
+                .help("The track's FX button lists every plugin")
+        } else {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { session.mixerFull = true }
+            } label: {
+                HStack(spacing: 3) {
+                    label
+                    Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 7, weight: .bold))
+                }
+                .foregroundStyle(Theme.accent)
+                .frame(maxWidth: .infinity).frame(height: 16)
+                .background(RoundedRectangle(cornerRadius: 3).fill(Theme.accent.opacity(0.12)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Show every effect: the mixer fills the window (⇧X)")
+        }
+    }
+
+    private var addMenu: some View {
+        Menu {
+            ForEach(PluginCatalog.grouped(PluginCatalog.effects), id: \.0) { group in
+                Menu(group.0) {
+                    ForEach(group.1) { info in
+                        Button(info.name) { session.addInsert(info, to: track.id) }
+                    }
+                }
+            }
+        } label: {
+            Text("+ Insert").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.dim)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
     }
 }

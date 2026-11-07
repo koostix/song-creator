@@ -112,6 +112,27 @@ enum SelfTest {
                 panel.cacheDisplay(in: panel.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("fx-panel.png"))
             }
+            let savedMixerHeight = session.mixerHeight   // the app's own setting: put it back afterwards
+            // The mixer: at the default height a long chain ends in "+N more"; taller, or filling the window, shows it all.
+            for (name, mixerFull, height) in [("main-mixer-default", false, Session.defaultMixerHeight),
+                                              ("main-mixer-tall", false, 700.0), ("main-mixer-full", true, Session.defaultMixerHeight)] {
+                session.showMixer = true
+                session.mixerFull = mixerFull
+                session.mixerHeight = height
+                let main = NSHostingView(rootView: MainView(session: session).environment(model).frame(width: 1300, height: 960))
+                window.contentView = main
+                window.setContentSize(NSSize(width: 1300, height: 960))
+                window.orderFrontRegardless()
+                main.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+                if let rep = main.bitmapImageRepForCachingDisplay(in: main.bounds) {
+                    main.cacheDisplay(in: main.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("\(name).png"))
+                }
+            }
+            session.showMixer = false
+            session.mixerFull = false
+            session.mixerHeight = savedMixerHeight
             window.orderOut(nil)
             session.headerWidth = savedWidth
             for (name, v, size) in parts {
@@ -1011,6 +1032,31 @@ enum SelfTest {
             try check(!missingSession.isConnected(ExternalMIDI(deviceID: -12345, deviceName: "Gone", channel: 1)),
                       "an unplugged external MIDI device shows as not connected")
             missingSession.close()
+        }
+
+        print("Mixer size and mixdown names")
+        do {
+            // At the default mixer height three rows fit: a fourth effect turns the last row into "+2 more".
+            let h = InsertSlots.minHeight
+            try check(InsertSlots.layout(height: h, instrument: false, inserts: 3) == (3, 0), "three effects fit the default mixer")
+            try check(InsertSlots.layout(height: h, instrument: false, inserts: 4) == (2, 2),
+                      "a fourth effect shows two and a '+2 more' row, without crowding the Insert button")
+            try check(InsertSlots.layout(height: h, instrument: true, inserts: 3) == (1, 2), "a MIDI track's instrument takes a row")
+            try check(InsertSlots.layout(height: h + 4 * InsertSlots.rowHeight, instrument: false, inserts: 7) == (7, 0),
+                      "a taller mixer shows a long chain in full")
+
+            var parts = DateComponents()
+            parts.year = 2026; parts.month = 11; parts.day = 7; parts.hour = 17; parts.minute = 48
+            let stamp = Session.mixdownStamp(Calendar.current.date(from: parts)!)
+            try check(stamp.hasPrefix("2026-11-07 ") && !stamp.contains(":") && !stamp.contains("\u{202F}"),
+                      "mixdown names start with the date (\(stamp))")
+            let bounces = dir.appendingPathComponent("Bounces")
+            try FileManager.default.createDirectory(at: bounces, withIntermediateDirectories: true)
+            let first = Session.unusedURL(bounces.appendingPathComponent("Song mix \(stamp)"), ext: "wav")
+            try Data().write(to: first)
+            let second = Session.unusedURL(bounces.appendingPathComponent("Song mix \(stamp)"), ext: "wav")
+            try check(first.lastPathComponent == "Song mix \(stamp).wav" && second.lastPathComponent == "Song mix \(stamp) 2.wav",
+                      "a second mixdown in the same minute doesn't overwrite the first")
         }
 
         print("Auto-arm monitoring")
