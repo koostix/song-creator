@@ -695,6 +695,7 @@ final class Session {
     }
 
     func removeInsert(_ slot: UUID, from track: UUID) {
+        PluginWindows.close(slot)
         updateTrack(track) { $0.inserts.removeAll { $0.id == slot } }
     }
 
@@ -704,6 +705,11 @@ final class Session {
             let j = max(0, min(t.inserts.count - 1, i + delta))
             t.inserts.insert(t.inserts.remove(at: i), at: j)
         }
+    }
+
+    /// Reorder the effect chain (from a drag in the FX panel); the audio is rewired to match.
+    func moveInserts(in track: UUID, from: IndexSet, to: Int) {
+        updateTrack(track) { $0.inserts.move(fromOffsets: from, toOffset: to) }
     }
 
     func toggleBypass(_ slot: UUID, in track: UUID) {
@@ -725,7 +731,10 @@ final class Session {
             message = audio.pluginErrors[slot.id] ?? "\(slot.name) is still loading."
             return
         }
-        PluginWindows.open(unit, slot: slot.id, title: "\(slot.name) — \(track.name)")
+        // Effects get an on/off button in the window's title bar, to compare with and without them.
+        let isEffect = track.inserts.contains { $0.id == slot.id }
+        let power = isEffect ? NSHostingView(rootView: PluginPowerButton(session: self, trackID: track.id, slotID: slot.id)) : nil
+        PluginWindows.open(unit, slot: slot.id, title: "\(slot.name) — \(track.name)", accessory: power)
     }
 
     func pluginStatus(_ slot: PluginSlot) -> String? {

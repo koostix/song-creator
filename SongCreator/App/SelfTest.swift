@@ -20,7 +20,11 @@ enum SelfTest {
             song.tracks.append(Track(name: "Track 3", colorIndex: 2))
             var keys = Track(name: "Keys 4", kind: .midi, colorIndex: 3, channels: 2)
             keys.inserts = [PluginSlot(name: "AUDelay", manufacturer: "Apple", type: kAudioUnitType_Effect,
-                                       subType: kAudioUnitSubType_Delay, manufacturerCode: kAudioUnitManufacturer_Apple)]
+                                       subType: kAudioUnitSubType_Delay, manufacturerCode: kAudioUnitManufacturer_Apple),
+                            PluginSlot(name: "AUDistortion", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                       subType: kAudioUnitSubType_Distortion, manufacturerCode: kAudioUnitManufacturer_Apple, bypass: true),
+                            PluginSlot(name: "AUMatrixReverb with a long name", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                       subType: kAudioUnitSubType_MatrixReverb, manufacturerCode: kAudioUnitManufacturer_Apple)]
             song.tracks.append(keys)
             var synth = Track(name: "drums with a long name", kind: .midi, colorIndex: 4, channels: 2)
             synth.external = ExternalMIDI(deviceID: 999, deviceName: "Volt 1 USB Audio Interface", channel: 10)
@@ -93,6 +97,20 @@ enum SelfTest {
             if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
                 host.cacheDisplay(in: host.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("tracks-narrow-appkit.png"))
+            }
+            // Keep the window up: hiding the app's last window and running the loop again would quit the app.
+            // The FX panel, as the FX button opens it. (Plugins show as loading: this runs in a main-queue block,
+            // so their loads, also queued on main, can't finish until it returns.)
+            let panel = NSHostingView(rootView: FXChainPanel(session: session, trackID: song.tracks[2].id)
+                .background(Theme.panel).environment(model).preferredColorScheme(.dark))
+            window.contentView = panel
+            window.setContentSize(panel.fittingSize)
+            window.orderFrontRegardless()
+            panel.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            if let rep = panel.bitmapImageRepForCachingDisplay(in: panel.bounds) {
+                panel.cacheDisplay(in: panel.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("fx-panel.png"))
             }
             window.orderOut(nil)
             session.headerWidth = savedWidth
@@ -494,6 +512,24 @@ enum SelfTest {
                   "plugins load (\(audio.pluginErrors.values.joined(separator: ", ")))")
         audio.sync(song)
         try check(audio.tracks[fx.id]?.inserts == [lowpass.id], "insert is wired into the track chain")
+        // Reordering the chain (a drag in the FX panel) rewires the audio in the new order.
+        let highpass = PluginSlot(name: "AUHipass", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                  subType: kAudioUnitSubType_HighPassFilter, manufacturerCode: kAudioUnitManufacturer_Apple)
+        var chain = song
+        chain.tracks[0].inserts = [lowpass, highpass]
+        audio.sync(chain)
+        waitForPlugins(audio, [highpass])
+        audio.sync(chain)
+        try check(audio.tracks[fx.id]?.inserts == [lowpass.id, highpass.id], "a second insert follows the first")
+        chain.tracks[0].inserts.move(fromOffsets: [1], toOffset: 0)
+        audio.sync(chain)
+        try check(audio.tracks[fx.id]?.inserts == [highpass.id, lowpass.id], "dragging an effect up rewires the chain in the new order")
+        chain.tracks[0].inserts[0].bypass = true
+        audio.sync(chain)
+        try check(audio.unit(highpass.id)!.auAudioUnit.shouldBypassEffect && !audio.unit(lowpass.id)!.auAudioUnit.shouldBypassEffect,
+                  "switching an effect off bypasses just that one")
+        audio.sync(song)
+        try check(audio.tracks[fx.id]?.inserts == [lowpass.id], "removing it leaves the rest wired")
         try check(audio.tracks[synth.id]?.instrumentSlot == dls.id, "AU instrument replaces the built-in sampler")
         // Low-pass at 200 Hz should cut the 880 Hz section far more than the 440 Hz one.
         AudioUnitSetParameter(audio.unit(lowpass.id)!.audioUnit, kLowPassParam_CutoffFrequency, kAudioUnitScope_Global, 0, 200, 0)

@@ -346,6 +346,7 @@ enum PluginTest {
             check(session.audio.unit(slot.id)?.auAudioUnit.shouldBypassEffect == false, "\(fx.name): ⏻ again enables it")
             session.openEditor(session.song.tracks[0].inserts[0], track: session.song.tracks[0])
             spin(10) { PluginWindows.isOpen(slot.id) }
+            check(PluginWindows.isOpen(slot.id) && PluginWindows.hasAccessory(slot.id), "\(fx.name): the editor opens with its on/off button")
             session.removeInsert(slot.id, from: tid)
             spin(0.5)
             check(session.song.tracks[0].inserts.isEmpty && session.audio.unit(slot.id) == nil && !PluginWindows.isOpen(slot.id),

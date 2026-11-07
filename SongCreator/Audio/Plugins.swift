@@ -52,7 +52,8 @@ enum PluginCatalog {
 enum PluginWindows {
     private static var windows: [UUID: NSWindow] = [:]
 
-    static func open(_ unit: AVAudioUnit, slot: UUID, title: String) {
+    /// `accessory` goes at the right of the title bar (the effect's on/off button).
+    static func open(_ unit: AVAudioUnit, slot: UUID, title: String, accessory: NSView? = nil) {
         if let w = windows[slot] {
             w.makeKeyAndOrderFront(nil)
             return
@@ -75,6 +76,13 @@ enum PluginWindows {
                     window = makeWindow(size: view.frame.size, title: title)
                     window.contentView = view
                 }
+                if let accessory {
+                    accessory.frame.size = accessory.fittingSize
+                    let bar = NSTitlebarAccessoryViewController()
+                    bar.view = accessory
+                    bar.layoutAttribute = .trailing
+                    window.addTitlebarAccessoryViewController(bar)
+                }
                 window.center()
                 window.makeKeyAndOrderFront(nil)
                 windows[slot] = window
@@ -83,6 +91,8 @@ enum PluginWindows {
     }
 
     static func isOpen(_ slot: UUID) -> Bool { windows[slot]?.isVisible ?? false }
+    /// Whether the slot's editor window carries the on/off button.
+    static func hasAccessory(_ slot: UUID) -> Bool { !(windows[slot]?.titlebarAccessoryViewControllers.isEmpty ?? true) }
     /// How the last editor was shown: "plugin UI", "classic UI" or "generic controls".
     private(set) static var lastKind = ""
 

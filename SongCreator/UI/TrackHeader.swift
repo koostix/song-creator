@@ -35,7 +35,7 @@ struct TrackHeader: View {
                         })) { name in
                         session.updateTrack(track.id) { $0.name = name }
                     }
-                    FXMenu(session: session, track: track)
+                    FXButton(session: session, track: track)
                         .frame(width: 30, alignment: .leading)
                     MeterBar(level: { [audio = session.audio, id = track.id, armed = track.armed, kind = track.kind,
                                        ch = track.inputChannel, stereo = track.channels == 2] in
@@ -280,96 +280,166 @@ struct TrackHeader: View {
     }
 }
 
-/// Every plugin on a track (instrument and effects) in one place: click one to open its window.
-struct FXMenu: View {
+/// The track's plugin chain, one click away: the FX button opens it, a name opens that plugin's editor,
+/// the power button turns an effect on or off, and dragging a row moves it in the chain.
+struct FXButton: View {
     @Bindable var session: Session
     let track: Track
+    @State private var showing = false
 
     private var slots: [PluginSlot] { (track.instrument.map { [$0] } ?? []) + track.inserts }
 
     var body: some View {
         let problem = slots.contains { session.pluginStatus($0) != nil }
+        Button { showing.toggle() } label: {
+            HStack(spacing: 2) {
+                Text(track.inserts.isEmpty ? "FX" : "FX \(track.inserts.count)")
+                if problem { Circle().fill(Color.orange).frame(width: 5, height: 5) }
+            }
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(track.inserts.isEmpty ? Theme.dim : Theme.accent)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(track.inserts.isEmpty ? "Add an Audio Unit effect" : "This track's effects")
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            FXChainPanel(session: session, trackID: track.id)
+        }
+    }
+}
+
+struct FXChainPanel: View {
+    @Bindable var session: Session
+    let trackID: UUID
+
+    static let rowHeight: CGFloat = 30
+
+    var body: some View {
+        if let track = session.song.tracks.first(where: { $0.id == trackID }) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(track.name).font(.headline)
+                if track.kind == .midi { instrumentRow(track) }
+                Text(track.inserts.isEmpty ? "No effects yet" : "Effects · the sound flows top to bottom, drag to reorder")
+                    .font(.caption).foregroundStyle(Theme.dim)
+                if !track.inserts.isEmpty {
+                    List {
+                        ForEach(track.inserts) { slot in
+                            effectRow(slot, track: track)
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets())
+                        }
+                        .onMove { from, to in session.moveInserts(in: trackID, from: from, to: to) }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .scrollDisabled(track.inserts.count <= 8)
+                    .frame(height: CGFloat(min(track.inserts.count, 8)) * Self.rowHeight + 4)
+                }
+                addMenu
+            }
+            .padding(14)
+            .frame(width: 300)
+        }
+    }
+
+    private func effectRow(_ slot: PluginSlot, track: Track) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 10)).foregroundStyle(Theme.dim)
+                .help("Drag to move it in the chain")
+            Button { session.toggleBypass(slot.id, in: trackID) } label: {
+                Image(systemName: "power")
+                    .font(.system(size: 10, weight: .bold))
+                    .frame(width: 22, height: 18)
+                    .foregroundStyle(slot.bypass ? Theme.dim : Color.black)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(slot.bypass ? Color.white.opacity(0.08) : Theme.accent))
+            }
+            .buttonStyle(.plain)
+            .help(slot.bypass ? "Off: click to turn it on" : "On: click to turn it off and hear the track without it")
+            .accessibilityLabel(slot.bypass ? "Turn \(slot.name) on" : "Turn \(slot.name) off")
+            editorButton(slot, track: track, dimmed: slot.bypass)
+            Button { session.removeInsert(slot.id, from: trackID) } label: {
+                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.dim)
+                    .frame(width: 18, height: 18).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Remove \(slot.name)")
+            .accessibilityLabel("Remove \(slot.name)")
+        }
+        .frame(height: Self.rowHeight)
+    }
+
+    /// The plugin's name; clicking it opens the plugin's own window.
+    private func editorButton(_ slot: PluginSlot, track: Track, dimmed: Bool) -> some View {
+        let status = session.pluginStatus(slot)
+        return Button { session.openEditor(slot, track: track) } label: {
+            HStack(spacing: 6) {
+                Text(slot.name).lineLimit(1).truncationMode(.tail)
+                    .foregroundStyle(dimmed ? Theme.dim : Theme.text)
+                Spacer(minLength: 4)
+                if let status {
+                    Text(status == "Loading…" ? "loading" : "failed").font(.caption2).foregroundStyle(Color.orange)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(status.map { $0 == "Loading…" ? "\(slot.name) is still loading" : $0 } ?? "Open \(slot.name)")
+    }
+
+    @ViewBuilder private func instrumentRow(_ track: Track) -> some View {
+        HStack(spacing: 8) {
+            // Lines the name up with the effect names below (handle, gap, power button).
+            Image(systemName: "pianokeys").font(.system(size: 10)).foregroundStyle(Theme.dim).frame(width: 42, alignment: .leading)
+            if let slot = track.instrument {
+                editorButton(slot, track: track, dimmed: false)
+            } else if let ext = track.external {
+                Text("\(ext.deviceName) ch\(ext.channel)").lineLimit(1).foregroundStyle(Theme.dim)
+            } else {
+                Text("Built-in: \(GMPrograms.name(track.program))").lineLimit(1).foregroundStyle(Theme.dim)
+            }
+        }
+        .padding(.leading, 8)   // the list's own inset, so this row lines up with the effects
+        .help("Change the instrument from the menu next to A on the track")
+    }
+
+    private var addMenu: some View {
         Menu {
-            if track.kind == .midi {
-                Section("Instrument") {
-                    if let ext = track.external {
-                        Menu("External: \(ext.deviceName) ch\(ext.channel)") {
-                            instrumentChoices
-                            Divider()
-                            Button("Stop using \(ext.deviceName)") { session.setExternal(nil, on: track.id) }
-                        }
-                    } else if let slot = track.instrument {
-                        Menu(label(slot)) {
-                            Button("Open Editor") { session.openEditor(slot, track: track) }
-                            instrumentChoices
-                            Divider()
-                            Button("Remove (use built-in sounds)") { session.setInstrument(nil, on: track.id) }
-                        }
-                    } else {
-                        Menu("Built-in: \(GMPrograms.name(track.program))") { instrumentChoices }
-                    }
-                }
-            }
-            Section("Effects") {
-                if track.inserts.isEmpty {
-                    Text("No effects yet")
-                }
-                ForEach(track.inserts) { slot in
-                    Menu(label(slot)) {
-                        Button("Open Editor") { session.openEditor(slot, track: track) }
-                        Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: track.id) }
-                        Button("Move Up") { session.moveInsert(slot.id, in: track.id, by: -1) }
-                            .disabled(track.inserts.first?.id == slot.id)
-                        Button("Move Down") { session.moveInsert(slot.id, in: track.id, by: 1) }
-                            .disabled(track.inserts.last?.id == slot.id)
-                        Divider()
-                        Button("Remove") { session.removeInsert(slot.id, from: track.id) }
-                    }
-                }
-            }
-            Menu("Add Effect") {
-                ForEach(PluginCatalog.grouped(PluginCatalog.effects), id: \.0) { group in
-                    Menu(group.0) {
-                        ForEach(group.1) { info in
-                            Button(info.name) { session.addInsert(info, to: track.id) }
-                        }
+            ForEach(PluginCatalog.grouped(PluginCatalog.effects), id: \.0) { group in
+                Menu(group.0) {
+                    ForEach(group.1) { info in
+                        Button(info.name) { session.addInsert(info, to: trackID) }
                     }
                 }
             }
         } label: {
-            HStack(spacing: 2) {
-                Text(slots.isEmpty ? "FX" : "FX \(slots.count)")
-                if problem { Circle().fill(Color.orange).frame(width: 5, height: 5) }
-            }
-            .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(slots.isEmpty ? Theme.dim : Theme.accent)
+            Label("Add Effect", systemImage: "plus")
         }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-        .help(slots.isEmpty ? "Add an Audio Unit effect" : "Open this track's plugins")
+        .menuStyle(.borderlessButton)
+        .fixedSize()
     }
+}
 
-    /// Swap the instrument: Audio Units by manufacturer, or a built-in sound.
-    @ViewBuilder private var instrumentChoices: some View {
-        Menu("Change Instrument") {
-            Menu("Built-in sounds") {
-                ForEach(GMPrograms.list, id: \.0) { p in
-                    Button(p.1) { session.updateTrack(track.id) { $0.program = p.0; $0.instrument = nil } }
-                }
+/// On/off for one effect, shown in its editor window's title bar.
+struct PluginPowerButton: View {
+    @Bindable var session: Session
+    let trackID: UUID
+    let slotID: UUID
+
+    var body: some View {
+        let on = !(session.song.tracks.first { $0.id == trackID }?.inserts.first { $0.id == slotID }?.bypass ?? false)
+        Button { session.toggleBypass(slotID, in: trackID) } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "power").font(.system(size: 10, weight: .bold))
+                Text(on ? "On" : "Off").font(.system(size: 11, weight: .semibold))
             }
-            ForEach(PluginCatalog.grouped(PluginCatalog.instruments), id: \.0) { group in
-                Menu(group.0) {
-                    ForEach(group.1) { info in
-                        Button(info.name) { session.setInstrument(info, on: track.id) }
-                    }
-                }
-            }
+            .frame(width: 54, height: 20)
+            .foregroundStyle(on ? Color.black : Color.secondary)
+            .background(RoundedRectangle(cornerRadius: 5).fill(on ? Theme.accent : Color.gray.opacity(0.25)))
         }
-    }
-
-    private func label(_ slot: PluginSlot) -> String {
-        var s = slot.name
-        if slot.bypass { s += " (bypassed)" }
-        if let status = session.pluginStatus(slot) { s += " — " + (status == "Loading…" ? "loading" : "failed") }
-        return s
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10).padding(.vertical, 4)
+        .help(on ? "On: click to turn it off and hear the track without it" : "Off: click to turn it back on")
+        .accessibilityLabel(on ? "Turn off" : "Turn on")
     }
 }
