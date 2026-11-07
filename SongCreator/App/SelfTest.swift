@@ -528,6 +528,20 @@ enum SelfTest {
         audio.sync(chain)
         try check(audio.unit(highpass.id)!.auAudioUnit.shouldBypassEffect && !audio.unit(lowpass.id)!.auAudioUnit.shouldBypassEffect,
                   "switching an effect off bypasses just that one")
+        // Mixer moves re-sync the engine many times a second. Many plugins reset whenever bypass is set, even
+        // to the same value (a compressor then jumps to full level), so it must only be set when it changes.
+        var bypassSets = 0
+        let watch = audio.unit(lowpass.id)!.auAudioUnit.observe(\.shouldBypassEffect) { _, _ in bypassSets += 1 }
+        for db in stride(from: -12.0, through: 0, by: 1) {
+            chain.tracks[0].strip.volumeDB = db
+            audio.sync(chain)
+        }
+        try check(bypassSets == 0, "moving a fader leaves the plugins' bypass alone (set \(bypassSets) times)")
+        chain.tracks[0].inserts[1].bypass = true
+        audio.sync(chain)
+        audio.sync(chain)
+        try check(bypassSets == 1, "switching an effect off sets its bypass once")
+        watch.invalidate()
         audio.sync(song)
         try check(audio.tracks[fx.id]?.inserts == [lowpass.id], "removing it leaves the rest wired")
         try check(audio.tracks[synth.id]?.instrumentSlot == dls.id, "AU instrument replaces the built-in sampler")

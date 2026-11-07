@@ -593,7 +593,12 @@ final class AudioEngine {
         for slot in track.inserts {
             load(slot)
             if let unit = units[slot.id], pluginErrors[slot.id] == nil {
-                unit.auAudioUnit.shouldBypassEffect = slot.bypass
+                // Only on a real change: this runs on every mixer move, and many plugins (compressors,
+                // reverbs) reset their state whenever bypass is set, even to the same value. That clicks and
+                // briefly drops a compressor's gain reduction, so the track jumps to full level.
+                if unit.auAudioUnit.shouldBypassEffect != slot.bypass {
+                    unit.auAudioUnit.shouldBypassEffect = slot.bypass
+                }
                 wanted.append(slot.id)
             }
         }
