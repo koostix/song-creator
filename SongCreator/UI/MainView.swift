@@ -95,9 +95,9 @@ struct MainView: View {
             case "p": shift ? s.punchSelection() : s.edit { $0.punchEnabled.toggle() }
             case "c": s.song.clickEnabled.toggle()
             case "m":
-                if shift { s.addMarker() } else if let id = selected { s.updateTrack(id, undoable: false) { $0.mute.toggle() } }
-            case "s": if let id = selected { s.updateTrack(id, undoable: false) { $0.solo.toggle() } }
-            case "a": if let id = selected { s.toggleArm(id) }
+                if shift { s.addMarker() } else { s.forSelectedTracks(fallback: selected) { $0.mute.toggle() } }
+            case "s": s.forSelectedTracks(fallback: selected) { $0.solo.toggle() }
+            case "a": s.toggleArmSelected(fallback: selected)
             case "t": s.addTrack(kind: shift ? .midi : .audio)
             case "x": withAnimation(.easeOut(duration: 0.15)) { s.showMixer.toggle() }
             case "z": s.zoomToFit()

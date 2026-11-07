@@ -22,7 +22,10 @@ enum SelfTest {
             keys.inserts = [PluginSlot(name: "AUDelay", manufacturer: "Apple", type: kAudioUnitType_Effect,
                                        subType: kAudioUnitSubType_Delay, manufacturerCode: kAudioUnitManufacturer_Apple)]
             song.tracks.append(keys)
-            song.tracks.append(Track(name: "synth", kind: .midi, colorIndex: 4, channels: 2))
+            var synth = Track(name: "drums with a long name", kind: .midi, colorIndex: 4, channels: 2)
+            synth.external = ExternalMIDI(deviceID: 999, deviceName: "Volt 1 USB Audio Interface", channel: 10)
+            synth.takes = [Take(name: "t", start: 0, duration: 2, notes: []), Take(name: "t2", start: 0, duration: 2, notes: [])]
+            song.tracks.append(synth)
             song.loop = TimeRange(start: 0, end: 8)
             let model = AppModel()
             let session = Session(projectURL: project, song: song)
@@ -57,6 +60,42 @@ enum SelfTest {
                 }.padding(6).background(Theme.background).environment(\.continuousEdit, session.continuousEdit)),
                  CGSize(width: 760, height: 490)),
             ]
+            // The narrowest header column, with two tracks selected.
+            session.selectTrack(song.tracks[1].id, extend: false)
+            session.selectTrack(song.tracks[3].id, extend: true)
+            let savedWidth = session.headerWidth
+            session.headerWidth = Session.headerWidthRange.lowerBound
+            let narrow = ImageRenderer(content: VStack(spacing: 0) {
+                ForEach(session.song.tracks) { t in
+                    TrackRow(session: session, track: t)
+                    Divider().overlay(Color.black.opacity(0.6))
+                }
+            }.background(Theme.lane).environment(model).frame(width: 700, height: 400, alignment: .topLeading).preferredColorScheme(.dark))
+            narrow.scale = 1
+            if let img = narrow.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: dir.appendingPathComponent("tracks-narrow.png"))
+            }
+            // ImageRenderer can't draw menus; an AppKit-hosted copy in an offscreen window can.
+            let host = NSHostingView(rootView: VStack(spacing: 0) {
+                ForEach(session.song.tracks) { t in
+                    TrackRow(session: session, track: t)
+                    Divider().overlay(Color.black.opacity(0.6))
+                }
+                Spacer(minLength: 0)
+            }.background(Theme.lane).environment(model).preferredColorScheme(.dark))
+            let window = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 700, height: 400), styleMask: [.borderless],
+                                  backing: .buffered, defer: false)
+            window.contentView = host
+            window.orderFrontRegardless()
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("tracks-narrow-appkit.png"))
+            }
+            window.orderOut(nil)
+            session.headerWidth = savedWidth
             for (name, v, size) in parts {
                 let r = ImageRenderer(content: v.environment(model).frame(width: size.width, height: size.height, alignment: .topLeading)
                     .preferredColorScheme(.dark))
@@ -501,6 +540,41 @@ enum SelfTest {
         session.undo()
         try check(session.song.tracks[0].strip.volumeDB == 0, "a fader move undoes in one step")
 
+        print("Track selection and arming")
+        do {
+            let before = session.song.tracks.count
+            session.addTrack(kind: .audio)
+            let a = session.selectedTrackID!
+            session.addTrack(kind: .audio)
+            let b = session.selectedTrackID!
+            let armed = session.song.tracks.filter(\.armed).map(\.id)
+            try check(armed == [b] && session.song.tracks.first { $0.id == b }!.monitor
+                      && !session.song.tracks.first { $0.id == a }!.monitor,
+                      "a new track takes the focus, the arm and the monitoring")
+            session.selectTrack(a, extend: true)
+            try check(session.selectedTrackIDs == [a, b] && Set(session.song.tracks.filter(\.armed).map(\.id)) == [a, b],
+                      "⇧-click adds a track to the selection and arms it too")
+            session.selectTrack(b, extend: true)
+            try check(session.selectedTrackIDs == [a] && session.selectedTrackID == a
+                      && session.song.tracks.filter(\.armed).map(\.id) == [a], "⇧-click again takes it back out")
+            session.selectTrack(a, extend: true)
+            try check(session.selectedTrackIDs == [a], "the last selected track stays selected")
+            session.selectTrack(b, extend: true)
+            session.toggleArmSelected(fallback: nil)
+            try check(session.song.tracks.allSatisfy { !$0.armed }, "A disarms every selected track")
+            session.toggleArmSelected(fallback: nil)
+            session.selectTrack(b, extend: false)
+            try check(session.selectedTrackIDs == [b] && session.song.tracks.filter(\.armed).map(\.id) == [b],
+                      "a plain click selects and arms just that track")
+            session.selectedTrackID = session.song.tracks[0].id
+            try check(session.selectedTrackIDs == [session.song.tracks[0].id] && session.song.tracks.first { $0.id == b }!.armed,
+                      "selecting from a region click leaves the arms alone")
+            session.deleteTrack(b)
+            session.deleteTrack(a)
+            try check(session.song.tracks.count == before && !session.selectedTrackIDs.contains(a), "deleted tracks leave the selection")
+            session.selectTrack(session.song.tracks[0].id, extend: false)
+        }
+
         print("Musical typing and zoom")
         session.selectedTrackID = session.song.tracks[0].id   // an audio track, as in a new song
         session.musicalTyping = true
@@ -666,7 +740,7 @@ enum SelfTest {
         session.inputEnabled = true
 
         let audioTrack = session.song.tracks.first { $0.kind == .audio }!.id
-        session.updateTrack(audioTrack, undoable: false) { $0.monitor = true }
+        session.selectTrack(audioTrack, extend: false)   // armed and monitoring, as clicking it does
         let monitorOn = { session.audio.tracks[audioTrack]?.monitorReader?.enabled.load(ordering: .relaxed) ?? false }
         session.feedbackProtection = true
         print("  on speakers: \(session.onSpeakers), input usable: \(session.audio.canMonitorInput)")
@@ -861,6 +935,9 @@ enum SelfTest {
             mon.addTrack(kind: .audio)
             let on = { (id: UUID) in mon.audio.tracks[id]?.monitorReader?.enabled.load(ordering: .relaxed) ?? false }
             let firstID = mon.song.tracks[0].id, secondID = mon.song.tracks[1].id
+            // The new track took the arm; give it back to the first and leave I on for both.
+            mon.updateTrack(firstID, undoable: false) { $0.armed = true; $0.monitor = true }
+            mon.updateTrack(secondID, undoable: false) { $0.armed = false; $0.monitor = true }
             try check(mon.song.tracks[1].monitor && !mon.song.tracks[1].armed && !on(secondID), "an unarmed track doesn't play the input")
             if mon.audio.canMonitorInput { try check(on(firstID), "the armed track does") }
             mon.close()

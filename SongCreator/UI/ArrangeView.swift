@@ -1,7 +1,8 @@
 import SwiftUI
 
 enum Layout {
-    static let headerWidth: CGFloat = 236
+    /// The track header column's starting width; drag its edge to resize it.
+    static let headerWidth: CGFloat = 256
     static let rulerHeight: CGFloat = 32
     static let markerHeight: CGFloat = 20
     static let laneHeight: CGFloat = 76
@@ -36,7 +37,7 @@ struct ArrangeView: View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 TrackListCorner(session: session)
-                    .frame(width: Layout.headerWidth, height: Layout.rulerHeight + Layout.markerHeight)
+                    .frame(width: session.headerWidth, height: Layout.rulerHeight + Layout.markerHeight)
                 GeometryReader { geo in
                     RulerView(session: session)
                         .onAppear { session.timelineWidth = geo.size.width }
@@ -58,14 +59,17 @@ struct ArrangeView: View {
             }
             .overlay(alignment: .topLeading) {
                 LaneOverlay(session: session, playhead: session.playhead)
-                    .padding(.leading, Layout.headerWidth)
+                    .padding(.leading, session.headerWidth)
                     .allowsHitTesting(false)
+            }
+            .overlay(alignment: .topLeading) {
+                HeaderResizeHandle(session: session).offset(x: session.headerWidth - 3)
             }
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let p):
-                    hovering = p.x > Layout.headerWidth
-                    hoverX = p.x - Layout.headerWidth
+                    hovering = p.x > session.headerWidth
+                    hoverX = p.x - session.headerWidth
                 case .ended:
                     hovering = false
                 }
@@ -374,8 +378,9 @@ struct TrackRow: View {
     var body: some View {
         HStack(spacing: 0) {
             TrackHeader(session: session, track: track)
-                .frame(width: Layout.headerWidth)
+                .frame(width: session.headerWidth, alignment: .leading)
                 .frame(maxHeight: .infinity, alignment: .top)
+                .clipped()
             VStack(spacing: 0) {
                 MainLane(session: session, track: track)
                     .frame(height: Layout.laneHeight)
@@ -391,7 +396,37 @@ struct TrackRow: View {
                 }
             }
         }
-        .background(session.selectedTrackID == track.id ? Color.white.opacity(0.035) : Color.clear)
+        .background(session.selectedTrackIDs.contains(track.id) ? Color.white.opacity(0.035) : Color.clear)
+    }
+}
+
+/// The edge between the track headers and the timeline: drag to resize the headers, double-click to reset.
+struct HeaderResizeHandle: View {
+    @Bindable var session: Session
+    @State private var startWidth: CGFloat?
+    @State private var hover = false
+
+    var body: some View {
+        Rectangle()
+            .fill(hover || startWidth != nil ? Theme.accent.opacity(0.6) : Color.clear)
+            .frame(width: 2)
+            .frame(width: 6)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                hover = inside
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { v in
+                    let start = startWidth ?? session.headerWidth
+                    startWidth = start
+                    let r = Session.headerWidthRange
+                    session.headerWidth = min(r.upperBound, max(r.lowerBound, (start + v.translation.width).rounded()))
+                }
+                .onEnded { _ in startWidth = nil })
+            .onTapGesture(count: 2) { session.headerWidth = Layout.headerWidth }
+            .help("Drag to resize the track headers, double-click to reset")
     }
 }
 

@@ -86,7 +86,26 @@ final class Session {
 
     // Editing / view state
     var selection: TimeRange?
-    var selectedTrackID: UUID? { didSet { updateSelectedMIDI() } }
+    /// The focused track: shortcuts and the tuner use it, new tracks go after it.
+    var selectedTrackID: UUID? {
+        didSet {
+            // Focusing a track outside the selection makes it the only selected one.
+            if let id = selectedTrackID { if !selectedTrackIDs.contains(id) { selectedTrackIDs = [id] } }
+            else { selectedTrackIDs = [] }
+            updateSelectedMIDI()
+        }
+    }
+    /// Every selected track (⇧-click adds more). Always includes the focused one.
+    private(set) var selectedTrackIDs: Set<UUID> = []
+    /// Width of the track header column, remembered for every song.
+    var headerWidth: CGFloat = Session.savedHeaderWidth {
+        didSet { UserDefaults.standard.set(Double(headerWidth), forKey: "trackHeaderWidth") }
+    }
+    static let headerWidthRange: ClosedRange<CGFloat> = 220...420
+    private static var savedHeaderWidth: CGFloat {
+        let w = UserDefaults.standard.double(forKey: "trackHeaderWidth")
+        return w == 0 ? Layout.headerWidth : min(max(w, headerWidthRange.lowerBound), headerWidthRange.upperBound)
+    }
     var selectedRegions: Set<UUID> = []
     /// The track whose name is being edited; Tab moves this to the next track.
     var renamingTrackID: UUID?
@@ -1079,13 +1098,15 @@ final class Session {
         edit { s in
             let n = s.tracks.count + 1
             var t = Track(name: kind == .midi ? "Keys \(n)" : "Track \(n)", kind: kind, colorIndex: s.tracks.count % TrackPalette.count)
-            if kind == .midi { t.channels = 2 } else { t.monitor = true }   // ready for headphones
+            if kind == .midi { t.channels = 2 }
             if let sel = selectedTrackID, let i = s.trackIndex(sel) {
                 s.tracks.insert(t, at: i + 1)
             } else {
                 s.tracks.append(t)
             }
             selectedTrackID = t.id
+            // The new track is the one to record next: it takes the arm and the monitoring (ready for headphones).
+            if !isRecording { Self.armOnly([t.id], in: &s) }
         }
     }
 
@@ -1095,7 +1116,8 @@ final class Session {
             return
         }
         edit { $0.tracks.removeAll { $0.id == id } }
-        if selectedTrackID == id { selectedTrackID = nil }
+        selectedTrackIDs.remove(id)
+        if selectedTrackID == id { selectedTrackID = selectedTrackIDs.first }
     }
 
     func updateTrack(_ id: UUID, undoable: Bool = true, _ change: (inout Track) -> Void) {
@@ -1109,6 +1131,51 @@ final class Session {
     func toggleArm(_ id: UUID) {
         guard !isRecording else { return }
         updateTrack(id, undoable: false) { $0.armed.toggle() }
+    }
+
+    /// Apply a change to every selected track (or `fallback` when none is selected), as M and S do.
+    func forSelectedTracks(fallback: UUID?, _ change: (inout Track) -> Void) {
+        let ids = selectedTrackIDs.isEmpty ? Set(fallback.map { [$0] } ?? []) : selectedTrackIDs
+        for id in ids { updateTrack(id, undoable: false, change) }
+    }
+
+    /// A: arm the selected tracks, or disarm them if they're all armed already.
+    func toggleArmSelected(fallback: UUID?) {
+        guard !isRecording else { return }
+        let ids = selectedTrackIDs.isEmpty ? Set(fallback.map { [$0] } ?? []) : selectedTrackIDs
+        let allArmed = song.tracks.filter { ids.contains($0.id) }.allSatisfy(\.armed)
+        for id in ids { updateTrack(id, undoable: false) { $0.armed = !allArmed } }
+    }
+
+    /// Clicking a track header: select it, and record arming and monitoring follow the selection. With `extend`
+    /// (⇧-click) the track is added to or taken out of the selection, to record several inputs at once.
+    func selectTrack(_ id: UUID, extend: Bool) {
+        if extend, !selectedTrackIDs.isEmpty {
+            if selectedTrackIDs.contains(id) {
+                guard selectedTrackIDs.count > 1 else { return }
+                selectedTrackIDs.remove(id)
+                if selectedTrackID == id { selectedTrackID = song.tracks.first { selectedTrackIDs.contains($0.id) }?.id }
+            } else {
+                selectedTrackIDs.insert(id)
+                selectedTrackID = id
+            }
+        } else {
+            selectedTrackID = id
+            selectedTrackIDs = [id]
+        }
+        // A take in progress keeps its armed tracks.
+        guard !isRecording else { return }
+        let ids = selectedTrackIDs
+        Self.armOnly(ids, in: &song)
+    }
+
+    /// Arm exactly `ids`; audio tracks monitor while armed and stop when they're not.
+    static func armOnly(_ ids: Set<UUID>, in s: inout Song) {
+        for i in s.tracks.indices {
+            let on = ids.contains(s.tracks[i].id)
+            s.tracks[i].armed = on
+            if s.tracks[i].kind == .audio { s.tracks[i].monitor = on }
+        }
     }
 
     func moveTrack(_ id: UUID, by delta: Int) {

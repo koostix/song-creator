@@ -18,7 +18,7 @@ struct TrackHeader: View {
     @Bindable var session: Session
     let track: Track
 
-    private var selected: Bool { session.selectedTrackID == track.id }
+    private var selected: Bool { session.selectedTrackIDs.contains(track.id) }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -36,6 +36,7 @@ struct TrackHeader: View {
                         session.updateTrack(track.id) { $0.name = name }
                     }
                     FXMenu(session: session, track: track)
+                        .frame(width: 30, alignment: .leading)
                     MeterBar(level: { [audio = session.audio, id = track.id, armed = track.armed, kind = track.kind,
                                        ch = track.inputChannel, stereo = track.channels == 2] in
                         // Armed audio tracks show their input; otherwise the track output.
@@ -55,7 +56,9 @@ struct TrackHeader: View {
                     LitButton(label: "S", on: track.solo, color: Color.yellow, help: "Solo (S)") {
                         session.updateTrack(track.id, undoable: false) { $0.solo.toggle() }
                     }
-                    if track.kind == .audio {
+                    if track.kind == .midi {
+                        quantizeMenu
+                    } else {
                         LitButton(label: "I", on: track.monitor,
                                   color: session.monitoringMuted || !session.inputEnabled ? Color.orange : Theme.accent,
                                   help: !session.inputEnabled ? "Input monitoring (the audio input is switched off)"
@@ -67,8 +70,11 @@ struct TrackHeader: View {
                     LitButton(label: "A", on: track.showAutomation, color: .green, help: "Show volume/pan automation") {
                         session.updateTrack(track.id, undoable: false) { $0.showAutomation.toggle() }
                     }
-                    if track.kind == .audio { inputMenu } else { quantizeMenu; instrumentMenu }
-                    Spacer(minLength: 0)
+                    Group {
+                        if track.kind == .audio { inputMenu } else { instrumentMenu }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(-1)
                     if !track.takes.isEmpty {
                         Button {
                             session.updateTrack(track.id, undoable: false) { $0.showTakes.toggle() }
@@ -90,7 +96,9 @@ struct TrackHeader: View {
         .frame(height: Layout.laneHeight, alignment: .top)
         .background(selected ? Color.white.opacity(0.06) : Theme.panel.opacity(0.6))
         .contentShape(Rectangle())
-        .onTapGesture { session.selectedTrackID = track.id }
+        .onTapGesture {
+            session.selectTrack(track.id, extend: NSEvent.modifierFlags.contains(.shift) || NSEvent.modifierFlags.contains(.command))
+        }
         .contextMenu {
             Button("Move Up") { session.moveTrack(track.id, by: -1) }
             Button("Move Down") { session.moveTrack(track.id, by: 1) }
@@ -183,11 +191,11 @@ struct TrackHeader: View {
         } label: {
             Text(instrumentLabel)
                 .font(.system(size: 10, weight: .medium))
+                .lineLimit(1).truncationMode(.tail)
                 .foregroundStyle(track.instrument.flatMap { session.pluginStatus($0) } != nil ? Color.orange
                                  : track.external.map { session.isConnected($0) ? Theme.accent : Color.orange } ?? Theme.text)
         }
         .menuStyle(.borderlessButton)
-        .fixedSize()
         .help(track.external.map { ext in session.isConnected(ext)
                   ? "Plays \(ext.deviceName) on MIDI channel \(ext.channel)"
                   : "\(ext.deviceName) isn't connected. Plug it in, or pick another instrument here." }
@@ -227,18 +235,20 @@ struct TrackHeader: View {
         } label: {
             Text("Q")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
-                .frame(width: 22, height: 18)
                 .foregroundStyle(q != nil ? Color.black : Theme.dim)
-                .background(RoundedRectangle(cornerRadius: 4).fill(q != nil ? Color.mint : Color.white.opacity(0.08)))
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        // A menu's label can't carry a background on macOS, so the button shape sits behind the menu.
+        .frame(width: 22, height: 18)
+        .background(RoundedRectangle(cornerRadius: 4).fill(q != nil ? Color.mint : Color.white.opacity(0.08)))
         .help(q.map { "Quantize \($0.grid.label), \(Int($0.strength * 100))%\($0.swing > 0.501 ? ", swing \(Int(($0.swing * 100).rounded()))%" : "") — notes play on the grid, the recording stays as played" }
               ?? "Quantize (off): notes play as recorded")
     }
 
     private var instrumentLabel: String {
         if let ext = track.external {
-            return "⇄ \(ext.deviceName) ch\(ext.channel)" + (session.isConnected(ext) ? "" : " (not connected)")
+            // Orange when it isn't connected; the tooltip says so.
+            return "⇄ \(ext.deviceName) ch\(ext.channel)"
         }
         return track.instrument?.name ?? GMPrograms.name(track.program)
     }
