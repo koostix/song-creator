@@ -210,6 +210,16 @@ struct PluginSlot: Codable, Equatable, Identifiable {
     var bypass = false
     /// The plugin's full state as a property list.
     var state: Data?
+    /// Starting settings until the plugin has saved state of its own: a factory preset number, then
+    /// parameter values by address. Used for the built-in reverb and delay buses.
+    var preset: Int?
+    var params: [Int: Float]?
+    /// Apple's AUDelay only: keep its delay time at this note length of the song's tempo.
+    var tempoSync: DelayDivision?
+
+    var isAppleDelay: Bool {
+        type == kAudioUnitType_Effect && subType == kAudioUnitSubType_Delay && manufacturerCode == kAudioUnitManufacturer_Apple
+    }
 
     var description: AudioComponentDescription {
         AudioComponentDescription(componentType: type, componentSubType: subType,
@@ -229,8 +239,8 @@ struct ChannelStrip: Codable, Equatable {
     var compOn = false
     var compThreshold: Double = -18
     var compMakeup: Double = 4
-    var reverbSend: Double = 0
-    var delaySend: Double = 0
+    /// Send level (0–1) to each effect bus, by bus ID. After the fader, before the pan.
+    var sends: [UUID: Double] = [:]
 }
 
 struct Track: Codable, Identifiable, Equatable {
@@ -305,16 +315,49 @@ enum ReverbRoom: String, Codable, CaseIterable, Identifiable {
     var label: String { rawValue.capitalized }
 }
 
+extension ReverbRoom {
+    /// The matching AUMatrixReverb factory preset.
+    var factoryPreset: Int {
+        switch self {
+        case .room: return 1      // Medium Room
+        case .plate: return 5
+        case .hall: return 4      // Large Hall
+        case .cathedral: return 8
+        }
+    }
+}
+
 struct MasterSettings: Codable, Equatable {
     var volumeDB: Double = 0
     var limiterOn = true
-    var reverbRoom: ReverbRoom = .plate
-    var reverbReturnDB: Double = 0
-    var delayDivision: DelayDivision = .dottedEighth
-    var delayFeedback: Double = 30
-    var delayReturnDB: Double = 0
     /// Plugins on the whole mix, before the master fader and limiter.
     var inserts: [PluginSlot] = []
+}
+
+/// An effect bus: tracks send to it, it runs its own plugins, and it returns into the mix before the master.
+struct Bus: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var inserts: [PluginSlot] = []
+    /// Return level into the mix.
+    var returnDB: Double = 0
+    var mute = false
+
+    /// Apple's reverb, fully wet.
+    static func reverb(room: ReverbRoom = .plate, returnDB: Double = 0) -> Bus {
+        let slot = PluginSlot(name: "AUMatrixReverb", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                              subType: kAudioUnitSubType_MatrixReverb, manufacturerCode: kAudioUnitManufacturer_Apple,
+                              preset: room.factoryPreset, params: [0: 100])
+        return Bus(name: "Reverb", inserts: [slot], returnDB: returnDB)
+    }
+
+    /// Apple's delay, fully wet and synced to the tempo.
+    static func delay(division: DelayDivision = .dottedEighth, feedback: Double = 30, returnDB: Double = 0) -> Bus {
+        let slot = PluginSlot(name: "AUDelay", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                              subType: kAudioUnitSubType_Delay, manufacturerCode: kAudioUnitManufacturer_Apple,
+                              params: [0: 100, 2: Float(feedback), 3: 7000], tempoSync: division)
+        return Bus(name: "Delay", inserts: [slot], returnDB: returnDB)
+    }
 }
 
 struct Song: Codable, Equatable {
@@ -339,6 +382,10 @@ struct Song: Codable, Equatable {
     var countInBars = 1
     var autoArm: AutoArmMode = .off
     var master = MasterSettings()
+    /// Effect buses, in mixer order.
+    var buses: [Bus] = []
+
+    func busIndex(_ id: UUID) -> Int? { buses.firstIndex { $0.id == id } }
 
     var secondsPerBeat: Double { 60 / tempo }
     var secondsPerBar: Double { secondsPerBeat * Double(beatsPerBar) }
@@ -376,9 +423,18 @@ struct Song: Codable, Equatable {
         s.markers = []
         s.loopEnabled = false
         s.punchEnabled = false
+        var busIDs: [UUID: UUID] = [:]
+        s.buses = buses.map { b in
+            var b = b
+            busIDs[b.id] = UUID()
+            b.id = busIDs[b.id]!
+            b.inserts = b.inserts.map { var slot = $0; slot.id = UUID(); return slot }
+            return b
+        }
         s.tracks = tracks.map { t in
             var t = t
             t.id = UUID()
+            t.strip.sends = Dictionary(uniqueKeysWithValues: t.strip.sends.compactMap { k, v in busIDs[k].map { ($0, v) } })
             t.takes = []
             t.comp = []
             t.volumeAuto = []
@@ -402,6 +458,7 @@ struct Song: Codable, Equatable {
         // Monitoring on from the start: you hear yourself in headphones, and feedback protection keeps it
         // quiet while sound plays through the speakers.
         song.tracks = [Track(name: "Track 1", armed: true, monitor: true)]
+        song.buses = [.reverb(), .delay()]
         return song
     }
 }
@@ -484,8 +541,7 @@ extension ChannelStrip {
         compOn = try c.decodeIfPresent(Bool.self, forKey: .compOn) ?? d.compOn
         compThreshold = try c.decodeIfPresent(Double.self, forKey: .compThreshold) ?? d.compThreshold
         compMakeup = try c.decodeIfPresent(Double.self, forKey: .compMakeup) ?? d.compMakeup
-        reverbSend = try c.decodeIfPresent(Double.self, forKey: .reverbSend) ?? d.reverbSend
-        delaySend = try c.decodeIfPresent(Double.self, forKey: .delaySend) ?? d.delaySend
+        sends = try c.decodeIfPresent([UUID: Double].self, forKey: .sends) ?? d.sends
     }
 }
 
@@ -495,11 +551,6 @@ extension MasterSettings {
         let d = MasterSettings()
         volumeDB = try c.decodeIfPresent(Double.self, forKey: .volumeDB) ?? d.volumeDB
         limiterOn = try c.decodeIfPresent(Bool.self, forKey: .limiterOn) ?? d.limiterOn
-        reverbRoom = (try? c.decodeIfPresent(ReverbRoom.self, forKey: .reverbRoom)) ?? d.reverbRoom
-        reverbReturnDB = try c.decodeIfPresent(Double.self, forKey: .reverbReturnDB) ?? d.reverbReturnDB
-        delayDivision = (try? c.decodeIfPresent(DelayDivision.self, forKey: .delayDivision)) ?? d.delayDivision
-        delayFeedback = try c.decodeIfPresent(Double.self, forKey: .delayFeedback) ?? d.delayFeedback
-        delayReturnDB = try c.decodeIfPresent(Double.self, forKey: .delayReturnDB) ?? d.delayReturnDB
         inserts = try c.decodeIfPresent([PluginSlot].self, forKey: .inserts) ?? d.inserts
     }
 }
@@ -525,5 +576,55 @@ extension Song {
         countInBars = try c.decodeIfPresent(Int.self, forKey: .countInBars) ?? d.countInBars
         autoArm = (try? c.decodeIfPresent(AutoArmMode.self, forKey: .autoArm)) ?? d.autoArm
         master = try c.decodeIfPresent(MasterSettings.self, forKey: .master) ?? d.master
+        if let saved = try c.decodeIfPresent([Bus].self, forKey: .buses) {
+            buses = saved
+        } else {
+            // Songs from before buses had a built-in reverb and delay: they become the first two buses, with the
+            // same settings and each track's sends.
+            let old = (try? c.decodeIfPresent(LegacyReturns.self, forKey: .master)) ?? LegacyReturns()
+            let reverb = Bus.reverb(room: old.reverbRoom, returnDB: old.reverbReturnDB)
+            let delay = Bus.delay(division: old.delayDivision, feedback: old.delayFeedback, returnDB: old.delayReturnDB)
+            buses = [reverb, delay]
+            let sends = (try? c.decodeIfPresent([LegacyTrackSends].self, forKey: .tracks)) ?? []
+            for (i, old) in sends.enumerated() where i < tracks.count {
+                if old.reverb > 0 { tracks[i].strip.sends[reverb.id] = old.reverb }
+                if old.delay > 0 { tracks[i].strip.sends[delay.id] = old.delay }
+            }
+        }
     }
+}
+
+/// The master's built-in reverb and delay settings, as songs saved them before buses.
+private struct LegacyReturns: Decodable {
+    var reverbRoom: ReverbRoom = .plate
+    var reverbReturnDB: Double = 0
+    var delayDivision: DelayDivision = .dottedEighth
+    var delayFeedback: Double = 30
+    var delayReturnDB: Double = 0
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        reverbRoom = (try? c.decodeIfPresent(ReverbRoom.self, forKey: .reverbRoom)) ?? .plate
+        reverbReturnDB = (try? c.decodeIfPresent(Double.self, forKey: .reverbReturnDB)) ?? 0
+        delayDivision = (try? c.decodeIfPresent(DelayDivision.self, forKey: .delayDivision)) ?? .dottedEighth
+        delayFeedback = (try? c.decodeIfPresent(Double.self, forKey: .delayFeedback)) ?? 30
+        delayReturnDB = (try? c.decodeIfPresent(Double.self, forKey: .delayReturnDB)) ?? 0
+    }
+    enum CodingKeys: String, CodingKey { case reverbRoom, reverbReturnDB, delayDivision, delayFeedback, delayReturnDB }
+}
+
+/// A track's reverb and delay sends, as songs saved them before buses.
+private struct LegacyTrackSends: Decodable {
+    var reverb: Double = 0
+    var delay: Double = 0
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        let strip = try? c.nestedContainer(keyedBy: StripKeys.self, forKey: .strip)
+        reverb = (try? strip?.decodeIfPresent(Double.self, forKey: .reverbSend)) ?? 0
+        delay = (try? strip?.decodeIfPresent(Double.self, forKey: .delaySend)) ?? 0
+    }
+    enum Keys: String, CodingKey { case strip }
+    enum StripKeys: String, CodingKey { case reverbSend, delaySend }
 }

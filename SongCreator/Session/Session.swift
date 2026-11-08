@@ -664,6 +664,7 @@ final class Session {
         saveWork?.cancel()
         if capturePlugins {
             let slots = song.tracks.flatMap { $0.inserts + ($0.instrument.map { [$0] } ?? []) } + song.master.inserts
+                + song.buses.flatMap(\.inserts)
             for slot in slots {
                 if let data = audio.pluginState(slot.id) { pluginStates[slot.id] = data }
             }
@@ -683,6 +684,7 @@ final class Session {
             if let id = copy.tracks[i].instrument?.id, let d = pluginStates[id] { copy.tracks[i].instrument?.state = d }
         }
         apply(&copy.master.inserts)
+        for i in copy.buses.indices { apply(&copy.buses[i].inserts) }
         return copy
     }
 
@@ -702,22 +704,86 @@ final class Session {
 
     // MARK: - Plugins
 
-    // Effect chains belong to a track, or to the master when the ID is Song.masterID.
+    // Effect chains belong to a track, a bus, or the master when the ID is Song.masterID.
 
     func inserts(of owner: UUID) -> [PluginSlot] {
-        owner == Song.masterID ? song.master.inserts : (song.tracks.first { $0.id == owner }?.inserts ?? [])
+        if owner == Song.masterID { return song.master.inserts }
+        if let i = song.busIndex(owner) { return song.buses[i].inserts }
+        return song.tracks.first { $0.id == owner }?.inserts ?? []
     }
 
     func chainName(_ owner: UUID) -> String {
-        owner == Song.masterID ? "Master" : (song.tracks.first { $0.id == owner }?.name ?? "")
+        if owner == Song.masterID { return "Master" }
+        if let i = song.busIndex(owner) { return song.buses[i].name }
+        return song.tracks.first { $0.id == owner }?.name ?? ""
     }
 
     private func updateInserts(_ owner: UUID, undoable: Bool = true, _ change: (inout [PluginSlot]) -> Void) {
         if owner == Song.masterID {
             if undoable { edit { change(&$0.master.inserts) } } else { change(&song.master.inserts) }
+        } else if song.busIndex(owner) != nil {
+            updateBus(owner, undoable: undoable) { change(&$0.inserts) }
         } else {
             updateTrack(owner, undoable: undoable) { change(&$0.inserts) }
         }
+    }
+
+    /// Keep Apple's delay at a note length of the tempo (nil: its own delay time).
+    func setTempoSync(_ slot: UUID, in owner: UUID, _ division: DelayDivision?) {
+        updateInserts(owner) { list in
+            if let i = list.firstIndex(where: { $0.id == slot }) { list[i].tempoSync = division }
+        }
+    }
+
+    // MARK: - Effect buses
+
+    func updateBus(_ id: UUID, undoable: Bool = true, _ change: (inout Bus) -> Void) {
+        if undoable {
+            edit { s in if let i = s.busIndex(id) { change(&s.buses[i]) } }
+        } else if let i = song.busIndex(id) {
+            change(&song.buses[i])
+        }
+    }
+
+    /// A new, empty bus at the end of the mixer, with no sends yet.
+    func addBus() {
+        edit { s in
+            let used = Set(s.buses.map(\.name))
+            let name = (1...).lazy.map { "Bus \($0)" }.first { !used.contains($0) }!
+            s.buses.append(Bus(name: name))
+        }
+        // Every third bus adds a row of send knobs to each strip: make room for it.
+        let needed = MixerView.stripHeight(buses: song.buses.count) - MixerView.stripHeight(buses: song.buses.count - 1)
+        if needed > 0 { mixerHeight += needed }
+    }
+
+    /// Remove a bus, its plugins and every track's send to it.
+    func removeBus(_ id: UUID) {
+        for slot in song.buses.first(where: { $0.id == id })?.inserts ?? [] { PluginWindows.close(slot.id) }
+        edit { s in
+            s.buses.removeAll { $0.id == id }
+            for i in s.tracks.indices { s.tracks[i].strip.sends[id] = nil }
+        }
+    }
+
+    func renameBus(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        updateBus(id) { $0.name = trimmed }
+    }
+
+    /// Live (non-undoable) binding to a track's send level for one bus.
+    func sendBinding(track: UUID, bus: UUID) -> Binding<Double> {
+        Binding(
+            get: { self.song.tracks.first { $0.id == track }?.strip.sends[bus] ?? 0 },
+            set: { v in self.updateTrack(track, undoable: false) { $0.strip.sends[bus] = v > 0 ? v : nil } })
+    }
+
+    /// Live binding to a bus's return level.
+    func busReturnBinding(_ id: UUID) -> Binding<Double> {
+        Binding(
+            get: { self.song.buses.first { $0.id == id }?.returnDB ?? 0 },
+            set: { v in self.updateBus(id, undoable: false) { $0.returnDB = v } })
     }
 
     func addInsert(_ info: PluginInfo, to owner: UUID) {
@@ -758,7 +824,7 @@ final class Session {
 
     func openEditor(_ slot: PluginSlot, track: Track) { openEditor(slot, owner: track.id) }
 
-    /// Open a plugin's own window. `owner` is its track, or Song.masterID.
+    /// Open a plugin's own window. `owner` is its track or bus, or Song.masterID.
     func openEditor(_ slot: PluginSlot, owner: UUID) {
         guard let unit = audio.unit(slot.id) else {
             message = audio.pluginErrors[slot.id] ?? "\(slot.name) is still loading."

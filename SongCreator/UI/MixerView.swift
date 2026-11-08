@@ -5,6 +5,12 @@ struct MixerView: View {
 
     /// Strips are never shorter than this; a shorter mixer scrolls. Extra height goes to the effect slots.
     static let minStripHeight: CGFloat = Session.defaultMixerHeight - 12
+    /// Height of a row of send knobs. Two buses fit in one row; each further two add a row.
+    static let sendRowHeight: CGFloat = 42
+
+    static func stripHeight(buses: Int) -> CGFloat {
+        minStripHeight + CGFloat(max(0, (buses + 1) / 2 - 1)) * sendRowHeight
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -14,10 +20,13 @@ struct MixerView: View {
                         ChannelStripView(session: session, track: track)
                     }
                     Spacer(minLength: 12)
-                    ReturnsStrip(session: session)
+                    ForEach(Array(session.song.buses.enumerated()), id: \.element.id) { i, bus in
+                        BusStrip(session: session, bus: bus, color: BusStrip.color(i))
+                    }
+                    AddBusButton(session: session)
                     MasterStrip(session: session)
                 }
-                .frame(height: max(MixerView.minStripHeight, geo.size.height - 12))
+                .frame(height: max(MixerView.stripHeight(buses: session.song.buses.count), geo.size.height - 12))
                 .padding(6)
             }
         }
@@ -131,12 +140,7 @@ struct ChannelStripView: View {
             }
             .opacity(s.compOn ? 1 : 0.4)
 
-            HStack(spacing: 0) {
-                Knob(value: session.stripBinding(id, \.reverbSend), range: 0...1, label: "Verb",
-                     format: { String(format: "%.0f%%", $0 * 100) }, color: .purple)
-                Knob(value: session.stripBinding(id, \.delaySend), range: 0...1, label: "Delay",
-                     format: { String(format: "%.0f%%", $0 * 100) }, color: .cyan)
-            }
+            SendKnobs(session: session, trackID: id)
 
             Knob(value: session.stripBinding(id, \.pan), range: -1...1, label: "Pan",
                  format: { $0 == 0 ? "C" : ($0 < 0 ? String(format: "L%.0f", -$0 * 100) : String(format: "R%.0f", $0 * 100)) })
@@ -160,40 +164,98 @@ struct ChannelStripView: View {
     }
 }
 
-struct ReturnsStrip: View {
+/// A track's send to each bus, two to a row, in the buses' colors.
+struct SendKnobs: View {
+    @Bindable var session: Session
+    let trackID: UUID
+
+    var body: some View {
+        let buses = session.song.buses
+        VStack(spacing: 4) {
+            ForEach(Array(stride(from: 0, to: buses.count, by: 2)), id: \.self) { row in
+                HStack(spacing: 0) {
+                    ForEach(row..<min(row + 2, buses.count), id: \.self) { i in
+                        Knob(value: session.sendBinding(track: trackID, bus: buses[i].id), range: 0...1,
+                             label: buses[i].name, format: { String(format: "%.0f%%", $0 * 100) }, color: BusStrip.color(i))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// An effect bus: its plugins, then the return fader into the mix.
+struct BusStrip: View {
+    @Bindable var session: Session
+    let bus: Bus
+    let color: Color
+    @State private var renaming = false
+    @State private var newName = ""
+
+    static let colors: [Color] = [.purple, .cyan, .pink, .mint, .indigo, .teal, .yellow, .orange]
+    static func color(_ i: Int) -> Color { colors[i % colors.count] }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(bus.name).font(.system(size: 10, weight: .bold)).lineLimit(1)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 3)
+                .background(color.opacity(0.35))
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { startRename() }
+                .help("\(bus.name) bus — tracks send to it with their \(bus.name) knob. Double-click to rename.")
+                .contextMenu {
+                    Button("Rename…") { startRename() }
+                    Divider()
+                    Button("Remove Bus") { session.removeBus(bus.id) }
+                }
+            InsertSlots(session: session, bus: bus)
+            HStack(spacing: 3) {
+                Fader(db: session.busReturnBinding(bus.id), height: 104)
+                MeterBar(level: { [audio = session.audio, id = bus.id] in audio.meters.level(id) }).frame(width: 5, height: 96)
+            }
+            .help("Return: how much of the bus goes into the mix")
+            Text(bus.returnDB.dbString).font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.dim)
+            LitButton(label: "M", on: bus.mute, color: .orange, help: "Mute the bus") {
+                session.updateBus(bus.id, undoable: false) { $0.mute.toggle() }
+            }
+        }
+        .padding(.bottom, 6)
+        .frame(width: 92)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Theme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .alert("Rename Bus", isPresented: $renaming) {
+            TextField("Name", text: $newName)
+            Button("Rename") { session.renameBus(bus.id, to: newName) }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private func startRename() {
+        newName = bus.name
+        renaming = true
+    }
+}
+
+/// Adds an effect bus; every track gets a send knob for it.
+struct AddBusButton: View {
     @Bindable var session: Session
 
     var body: some View {
-        VStack(spacing: 8) {
-            Text("FX RETURNS").font(.system(size: 10, weight: .bold)).frame(maxWidth: .infinity)
-                .padding(.vertical, 3).background(Color.white.opacity(0.08))
-            Text("Reverb").font(.caption.bold()).foregroundStyle(.purple)
-            Picker("", selection: $session.song.master.reverbRoom) {
-                ForEach(ReverbRoom.allCases) { Text($0.label).tag($0) }
+        Button { session.addBus() } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "plus").font(.system(size: 11, weight: .bold))
+                Text("Bus").font(.system(size: 9, weight: .semibold))
             }
-            .labelsHidden().frame(width: 100)
-            Knob(value: $session.song.master.reverbReturnDB, range: -30...6, label: "Return",
-                 format: { String(format: "%+.1f dB", $0) }, color: .purple)
-            Divider()
-            Text("Delay").font(.caption.bold()).foregroundStyle(.cyan)
-            Picker("", selection: $session.song.master.delayDivision) {
-                ForEach(DelayDivision.allCases) { Text($0.label).tag($0) }
-            }
-            .labelsHidden().frame(width: 100)
-            HStack(spacing: 0) {
-                Knob(value: $session.song.master.delayFeedback, range: 0...90, defaultValue: 30, label: "Fdbk",
-                     format: { String(format: "%.0f%%", $0) }, color: .cyan)
-                Knob(value: $session.song.master.delayReturnDB, range: -30...6, label: "Return",
-                     format: { String(format: "%+.1f dB", $0) }, color: .cyan)
-            }
-            Text("Synced to tempo").font(.system(size: 9)).foregroundStyle(Theme.dim)
-            Spacer()
+            .foregroundStyle(Theme.dim)
+            .frame(width: 30)
+            .frame(maxHeight: .infinity)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Theme.panel.opacity(0.6)))
+            .contentShape(Rectangle())
         }
-        .padding(.bottom, 6)
-        .frame(width: 120)
-        .frame(maxHeight: .infinity)
-        .background(Theme.panel)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .buttonStyle(.plain)
+        .help("Add an effect bus: put plugins on it, and every track gets a send knob for it")
     }
 }
 
@@ -234,6 +296,8 @@ struct PluginRow: View {
     let onOpen: () -> Void
     let onRemove: () -> Void
     var removeHelp = "Remove this plugin"
+    /// Extra detail for the hover help, like a delay's tempo sync.
+    var note: String?
 
     var body: some View {
         HStack(spacing: 3) {
@@ -244,7 +308,7 @@ struct PluginRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onOpen)
-                .help(status ?? "\(name) — click to open its editor")
+                .help(status ?? "\(name)\(note.map { " (\($0))" } ?? "") — click to open its editor")
             if let onBypass {
                 Button(action: onBypass) {
                     Image(systemName: "power").font(.system(size: 8, weight: .bold))
@@ -268,7 +332,7 @@ struct PluginRow: View {
 /// Takes the strip's spare height, so a taller mixer shows more of a long effect chain.
 struct InsertSlots: View {
     @Bindable var session: Session
-    /// The track, or Song.masterID.
+    /// The track or bus, or Song.masterID.
     let ownerID: UUID
     let inserts: [PluginSlot]
     /// A track's strip (MIDI tracks show their instrument first); nil on the master.
@@ -279,6 +343,14 @@ struct InsertSlots: View {
         ownerID = track.id
         inserts = track.inserts
         self.track = track
+    }
+
+    /// A bus's plugins, before its return fader.
+    init(session: Session, bus: Bus) {
+        self.session = session
+        ownerID = bus.id
+        inserts = bus.inserts
+        track = nil
     }
 
     /// The master's plugins, before its fader and limiter.
@@ -348,12 +420,21 @@ struct InsertSlots: View {
         PluginRow(name: slot.name, status: session.pluginStatus(slot), bypassed: slot.bypass,
                   onBypass: { session.toggleBypass(slot.id, in: ownerID) },
                   onOpen: { session.openEditor(slot, owner: ownerID) },
-                  onRemove: { session.removeInsert(slot.id, from: ownerID) })
+                  onRemove: { session.removeInsert(slot.id, from: ownerID) },
+                  note: slot.tempoSync.map { "synced to \($0.label) notes; right-click to change" })
             .contextMenu {
                 Button("Open Editor") { session.openEditor(slot, owner: ownerID) }
                 Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: ownerID) }
                 Button("Move Up") { session.moveInsert(slot.id, in: ownerID, by: -1) }
                 Button("Move Down") { session.moveInsert(slot.id, in: ownerID, by: 1) }
+                if slot.isAppleDelay {
+                    Picker("Sync to Tempo", selection: Binding(
+                        get: { slot.tempoSync },
+                        set: { session.setTempoSync(slot.id, in: ownerID, $0) })) {
+                        Text("Off").tag(DelayDivision?.none)
+                        ForEach(DelayDivision.allCases) { Text($0.label).tag(DelayDivision?.some($0)) }
+                    }
+                }
                 Divider()
                 Button("Remove") { session.removeInsert(slot.id, from: ownerID) }
             }

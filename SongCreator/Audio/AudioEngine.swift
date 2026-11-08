@@ -35,7 +35,7 @@ final class MeterStore {
 }
 
 /// The nodes behind one track:
-/// source (+ live input monitor) → preMix → EQ → compressor → AU inserts → strip → (master, reverb, delay).
+/// source (+ live input monitor) → preMix → EQ → compressor → AU inserts → strip → (master, each bus's send).
 final class TrackNodes {
     let id: UUID
     let kind: TrackKind
@@ -68,8 +68,10 @@ final class TrackNodes {
     let format: AVAudioFormat
     let inputChannel: Int
     var masterBus: AVAudioNodeBus = 0
-    var reverbBus: AVAudioNodeBus = 0
-    var delayBus: AVAudioNodeBus = 0
+    /// The strip's input on keepAlive (the strip always feeds it, so its sends can come and go).
+    var keepBus: AVAudioNodeBus = 0
+    /// The strip's input on each bus it sends to, by bus ID.
+    var sendBuses: [UUID: AVAudioNodeBus] = [:]
     var loadedProgram = Int.min
 
     init(track: Track, sampleRate: Double, instrument plugin: (UUID, AVAudioUnitMIDIInstrument)?) {
@@ -92,6 +94,20 @@ final class TrackNodes {
 
     var source: AVAudioNode { (player as AVAudioNode?) ?? instrument! }
     var sampler: AVAudioUnitSampler? { instrumentSlot == nil ? instrument as? AVAudioUnitSampler : nil }
+}
+
+/// The nodes behind one effect bus: sends sum into `input` → insertIn → its plugins → `output` (the return
+/// level) → the master mix.
+final class BusNodes {
+    let id: UUID
+    let input = AVAudioMixerNode()
+    /// Head of the plugin chain (see AudioEngine.wireChain).
+    let insertIn = AVAudioMixerNode()
+    let output = AVAudioMixerNode()
+    var inserts: [UUID] = []
+    /// Its links into the mix are made (see AudioEngine.linkBus).
+    var linked = false
+    init(id: UUID) { self.id = id }
 }
 
 final class AudioEngine {
@@ -130,10 +146,8 @@ final class AudioEngine {
     /// until playback is restarted.
     private(set) var keepAlive = AVAudioMixerNode()
     private(set) var limiter = AVAudioUnitEffect(audioComponentDescription: AudioEngine.limiterDesc)
-    private(set) var reverbBus = AVAudioMixerNode()
-    private(set) var reverb = AVAudioUnitReverb()
-    private(set) var delayBus = AVAudioMixerNode()
-    private(set) var delay = AVAudioUnitDelay()
+    /// Effect buses, by bus ID.
+    private(set) var buses: [UUID: BusNodes] = [:]
     private(set) var clickPlayer = AVAudioPlayerNode()
     /// Plugin state carried across an engine rebuild, applied when each plugin reloads.
     private var carriedStates: [UUID: [String: Any]] = [:]
@@ -176,7 +190,6 @@ final class AudioEngine {
     var onPluginsChanged: (() -> Void)?
 
     let meters = MeterStore()
-    private var lastReverbRoom: ReverbRoom?
 
     /// Channels of the chosen input device (in an aggregate, the output device's own inputs are skipped).
     var inputChannelCount: Int {
@@ -218,13 +231,9 @@ final class AudioEngine {
         keepAlive = AVAudioMixerNode()
         masterInserts = []
         limiter = AVAudioUnitEffect(audioComponentDescription: AudioEngine.limiterDesc)
-        reverbBus = AVAudioMixerNode()
-        reverb = AVAudioUnitReverb()
-        delayBus = AVAudioMixerNode()
-        delay = AVAudioUnitDelay()
+        buses = [:]
         clickPlayer = AVAudioPlayerNode()
         tracks = [:]
-        lastReverbRoom = nil
         inputRing = nil
         inputSink = nil
         liveInput = false
@@ -333,8 +342,7 @@ final class AudioEngine {
             }
         }
 
-        for node in [masterMixer, masterIn, masterFader, limiter, reverbBus, reverb, delayBus, delay, clickPlayer,
-                     keepAlive] as [AVAudioNode] {
+        for node in [masterMixer, masterIn, masterFader, limiter, clickPlayer, keepAlive] as [AVAudioNode] {
             engine.attach(node)
         }
         engine.connect(keepAlive, to: engine.mainMixerNode, fromBus: 0,
@@ -344,14 +352,7 @@ final class AudioEngine {
         engine.connect(masterIn, to: masterFader, format: stereo)
         engine.connect(masterFader, to: limiter, format: stereo)
         engine.connect(limiter, to: engine.mainMixerNode, format: stereo)
-        engine.connect(reverbBus, to: reverb, format: stereo)
-        engine.connect(reverb, to: masterMixer, format: stereo)
-        engine.connect(delayBus, to: delay, format: stereo)
-        engine.connect(delay, to: masterMixer, format: stereo)
         engine.connect(clickPlayer, to: engine.mainMixerNode, format: clickFormat)
-        reverb.wetDryMix = 100
-        delay.wetDryMix = 100
-        delay.lowPassCutoff = 7000
 
         limiter.installTap(onBus: 0, bufferSize: 1024, format: nil) { [meters] buf, _ in
             meters.set(MeterStore.masterID, MeterStore.peak(buf))
@@ -504,6 +505,9 @@ final class AudioEngine {
 
     /// Create/remove/rewire track nodes so they match the song, then push all parameters.
     func sync(_ song: Song) {
+        // New buses first, so tracks can send to them; removed ones once no track sends there any more.
+        for bus in song.buses where buses[bus.id] == nil { addBus(bus.id) }
+        let busIDs = song.buses.map(\.id)
         let ids = Set(song.tracks.map(\.id))
         for (id, nodes) in tracks where !ids.contains(id) { removeNodes(nodes) }
         for track in song.tracks {
@@ -518,19 +522,26 @@ final class AudioEngine {
                existing.instrumentSlot == plugin?.0,
                existing.inputChannel == track.inputChannel,
                existing.monitorMode == TrackNodes.monitorMode(for: track) {
+                routeSends(existing, to: busIDs, levels: track.strip.sends)
                 wireInserts(existing, track)
                 continue
             }
             if let old = tracks[track.id] { removeNodes(old) }
-            let n = addNodes(for: track, instrument: plugin)
+            let n = addNodes(for: track, instrument: plugin, buses: busIDs)
             wireInserts(n, track)
+        }
+        for (id, nodes) in buses where !busIDs.contains(id) { removeBus(nodes) }
+        for bus in song.buses {
+            guard let n = buses[bus.id] else { continue }
+            linkBus(n)
+            if n.linked { n.inserts = wireChain(bus.inserts, current: n.inserts, from: n.insertIn, to: n.output) }
         }
         masterInserts = wireChain(song.master.inserts, current: masterInserts, from: masterIn, to: masterFader)
 
         // Plugins no longer referenced anywhere are released (after rewiring, which has already taken removed
         // effects out of their chains without breaking them).
         let liveSlots = Set(song.tracks.flatMap { $0.inserts.map(\.id) + ($0.instrument.map { [$0.id] } ?? []) }
-                            + song.master.inserts.map(\.id))
+                            + song.master.inserts.map(\.id) + song.buses.flatMap { $0.inserts.map(\.id) })
         for (id, unit) in units where !liveSlots.contains(id) {
             if unit.engine != nil {
                 engine.disconnectNodeOutput(unit)
@@ -543,7 +554,7 @@ final class AudioEngine {
     }
 
     @discardableResult
-    private func addNodes(for track: Track, instrument: (UUID, AVAudioUnitMIDIInstrument)?) -> TrackNodes {
+    private func addNodes(for track: Track, instrument: (UUID, AVAudioUnitMIDIInstrument)?, buses busIDs: [UUID]) -> TrackNodes {
         let n = TrackNodes(track: track, sampleRate: sampleRate, instrument: instrument)
         if n.source.engine != nil { n.source.engine?.detach(n.source) }
         for node in [n.source, n.preMix, n.eq, n.comp, n.insertIn, n.strip] { engine.attach(node) }
@@ -553,13 +564,8 @@ final class AudioEngine {
         feedChain(from: n.comp, to: n.insertIn)
         engine.connect(n.insertIn, to: n.strip, fromBus: 0, toBus: 0, format: stereo)
         n.masterBus = masterMixer.nextAvailableInputBus
-        n.reverbBus = reverbBus.nextAvailableInputBus
-        n.delayBus = delayBus.nextAvailableInputBus
-        engine.connect(n.strip, to: [
-            AVAudioConnectionPoint(node: masterMixer, bus: n.masterBus),
-            AVAudioConnectionPoint(node: reverbBus, bus: n.reverbBus),
-            AVAudioConnectionPoint(node: delayBus, bus: n.delayBus),
-        ], fromBus: 0, format: stereo)
+        n.keepBus = keepAlive.nextAvailableInputBus
+        routeSends(n, to: busIDs, levels: track.strip.sends, force: true)
 
         // Live input into the strip: an audio track's input, or a MIDI track's outboard gear coming back in.
         if n.monitorMode != .none, let ring = inputRing {
@@ -614,6 +620,65 @@ final class AudioEngine {
             engine.detach(node)
         }
         tracks[n.id] = nil
+    }
+
+    /// Point a track's strip at the master and at each bus. The strip always feeds keepAlive as well: the engine
+    /// won't take a fan-out down to a single link, and that keeps it at two or more as buses come and go.
+    private func routeSends(_ n: TrackNodes, to busIDs: [UUID], levels: [UUID: Double], force: Bool = false) {
+        let wanted = busIDs.filter { buses[$0] != nil }
+        guard force || Set(wanted) != Set(n.sendBuses.keys) else { return }
+        var points = [AVAudioConnectionPoint(node: masterMixer, bus: n.masterBus),
+                      AVAudioConnectionPoint(node: keepAlive, bus: n.keepBus)]
+        var sends: [UUID: AVAudioNodeBus] = [:]
+        for id in wanted {
+            let input = buses[id]!.input
+            let bus = n.sendBuses[id] ?? input.nextAvailableInputBus
+            sends[id] = bus
+            points.append(AVAudioConnectionPoint(node: input, bus: bus))
+        }
+        engine.connect(n.strip, to: points, fromBus: 0, format: stereo)
+        n.sendBuses = sends
+        // A new link starts at full level: set the real one now, not a render cycle later.
+        for (id, bus) in sends {
+            n.strip.destination(forMixer: buses[id]!.input, bus: bus)?.volume = Float(levels[id] ?? 0)
+        }
+    }
+
+    private func addBus(_ id: UUID) {
+        let n = BusNodes(id: id)
+        for node in [n.input, n.insertIn, n.output] { engine.attach(node) }
+        buses[id] = n
+    }
+
+    /// Link a bus into the mix, from its input down: input → insertIn → output → master. Done after the tracks'
+    /// strips feed its input, because a running engine silently drops a link from a node that nothing feeds yet.
+    /// If that still happens (a bus with no tracks to feed it), the next sync tries again.
+    private func linkBus(_ n: BusNodes) {
+        guard !n.linked else { return }
+        engine.connect(n.input, to: n.insertIn, fromBus: 0, toBus: 0, format: stereo)
+        engine.connect(n.insertIn, to: n.output, fromBus: 0, toBus: 0, format: stereo)
+        engine.connect(n.output, to: masterMixer, fromBus: 0, toBus: masterMixer.nextAvailableInputBus, format: stereo)
+        guard !engine.outputConnectionPoints(for: n.output, outputBus: 0).isEmpty else { return }
+        n.linked = true
+        let id = n.id
+        n.output.installTap(onBus: 0, bufferSize: 1024, format: nil) { [meters] buf, _ in
+            meters.set(id, MeterStore.peak(buf))
+        }
+    }
+
+    /// Called once no track sends to the bus any more, so nothing that plays is cut off.
+    private func removeBus(_ n: BusNodes) {
+        if n.linked { n.output.removeTap(onBus: 0) }
+        for id in n.inserts {
+            guard let unit = units[id], unit.engine != nil else { continue }
+            engine.disconnectNodeOutput(unit)
+            engine.detach(unit)
+        }
+        for node in [n.input, n.insertIn, n.output] where node.engine != nil {
+            engine.disconnectNodeOutput(node)
+            engine.detach(node)
+        }
+        buses[n.id] = nil
     }
 
     /// Put the track's loaded, stereo-capable insert plugins between insertIn and the strip.
@@ -708,6 +773,14 @@ final class AudioEngine {
                 } else if let data = slot.state,
                    let state = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
                     unit.auAudioUnit.fullState = state
+                } else {
+                    // Not saved yet: the slot's starting settings, if any (the built-in reverb and delay buses).
+                    if let number = slot.preset, let preset = unit.auAudioUnit.factoryPresets?.first(where: { $0.number == number }) {
+                        unit.auAudioUnit.currentPreset = preset
+                    }
+                    for (address, value) in slot.params ?? [:] {
+                        unit.auAudioUnit.parameterTree?.parameter(withAddress: AUParameterAddress(address))?.value = value
+                    }
                 }
                 // Effects run in stereo here; refuse plugins that can't.
                 if slot.type != kAudioUnitType_MusicDevice {
@@ -787,8 +860,10 @@ final class AudioEngine {
             guard let n = tracks[track.id] else { continue }
             let s = track.strip
             setLevel(track, n, anySolo: anySolo, at: automationTime)
-            n.strip.destination(forMixer: reverbBus, bus: n.reverbBus)?.volume = Float(s.reverbSend)
-            n.strip.destination(forMixer: delayBus, bus: n.delayBus)?.volume = Float(s.delaySend)
+            for (id, bus) in n.sendBuses {
+                guard let input = buses[id]?.input else { continue }
+                n.strip.destination(forMixer: input, bus: bus)?.volume = Float(s.sends[id] ?? 0)
+            }
             // Gear coming back from a MIDI track isn't a mic, so feedback protection doesn't apply to it.
             // Only the armed track listens: new tracks default to monitoring, and every unarmed one playing the
             // same input as well would stack it up louder and louder.
@@ -823,20 +898,17 @@ final class AudioEngine {
         masterFader.outputVolume = AudioEngine.gain(m.volumeDB)
         limiter.bypass = !m.limiterOn
         setParam(limiter, 2, 0) // pre-gain
-        if lastReverbRoom != m.reverbRoom {
-            lastReverbRoom = m.reverbRoom
-            switch m.reverbRoom {
-            case .room: reverb.loadFactoryPreset(.mediumRoom)
-            case .plate: reverb.loadFactoryPreset(.plate)
-            case .hall: reverb.loadFactoryPreset(.largeHall)
-            case .cathedral: reverb.loadFactoryPreset(.cathedral)
-            }
-            reverb.wetDryMix = 100
+        for bus in song.buses {
+            buses[bus.id]?.output.outputVolume = bus.mute ? 0 : AudioEngine.gain(bus.returnDB)
         }
-        reverbBus.outputVolume = AudioEngine.gain(m.reverbReturnDB)
-        delayBus.outputVolume = AudioEngine.gain(m.delayReturnDB)
-        delay.delayTime = min(2, m.delayDivision.beats * song.secondsPerBeat)
-        delay.feedback = Float(m.delayFeedback)
+        // Apple's delay, synced to the tempo where the slot asks for it.
+        let slots = song.buses.flatMap(\.inserts) + song.master.inserts + song.tracks.flatMap(\.inserts)
+        for slot in slots where slot.isAppleDelay {
+            guard let division = slot.tempoSync,
+                  let time = units[slot.id]?.auAudioUnit.parameterTree?.parameter(withAddress: 1) else { continue }
+            let wanted = AUValue(min(2, division.beats * song.secondsPerBeat))
+            if abs(time.value - wanted) > 0.0001 { time.value = wanted }
+        }
         clickPlayer.volume = Float(song.clickVolume)
     }
 

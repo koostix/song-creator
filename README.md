@@ -20,7 +20,9 @@ A native macOS multitrack recorder for getting a song down in one sitting: recor
 **Arranging and mixing**
 - Regions with split, copy, paste, duplicate, fades and automatic crossfades
 - Loop and punch ranges you can drag, section markers, undo and redo
-- A channel strip on every track (EQ, compressor, reverb and delay sends), plus Audio Unit effects
+- A channel strip on every track (EQ, compressor, a send to each effect bus), plus Audio Unit effects
+- Effect buses with their own Audio Unit effects and return faders: new songs start with a Reverb and a
+  tempo-synced Delay bus, and you can add as many as you like (older songs keep their reverb and delay as buses)
 - Audio Unit effects on the master too, before the master fader and limiter
 - A resizable mixer (drag its top edge, or ⇧X to fill the window) that shows more effects as it grows
 - Volume automation lanes and a master limiter

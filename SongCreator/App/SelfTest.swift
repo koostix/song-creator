@@ -32,6 +32,11 @@ enum SelfTest {
             song.tracks.append(synth)
             song.master.inserts = [PluginSlot(name: "AUDynamicsProcessor", manufacturer: "Apple", type: kAudioUnitType_Effect,
                                               subType: kAudioUnitSubType_DynamicsProcessor, manufacturerCode: kAudioUnitManufacturer_Apple)]
+            song.buses.append(Bus(name: "Vocal FX", inserts: [PluginSlot(name: "AUDistortion", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                                                         subType: kAudioUnitSubType_Distortion, manufacturerCode: kAudioUnitManufacturer_Apple)],
+                                  returnDB: -6))
+            song.tracks[0].strip.sends = [song.buses[0].id: 0.35, song.buses[2].id: 0.6]
+            song.tracks[1].strip.sends = [song.buses[1].id: 0.2]
             song.loop = TimeRange(start: 0, end: 8)
             let model = AppModel()
             let session = Session(projectURL: project, song: song)
@@ -61,10 +66,14 @@ enum SelfTest {
                 }.background(Theme.lane)), CGSize(width: 900, height: 480)),
                 ("strips", AnyView(HStack(alignment: .top, spacing: 2) {
                     ForEach(session.song.tracks) { t in ChannelStripView(session: session, track: t) }
-                    ReturnsStrip(session: session)
+                    ForEach(Array(session.song.buses.enumerated()), id: \.element.id) { i, bus in
+                        BusStrip(session: session, bus: bus, color: BusStrip.color(i))
+                    }
+                    AddBusButton(session: session)
                     MasterStrip(session: session)
-                }.padding(6).background(Theme.background).environment(\.continuousEdit, session.continuousEdit)),
-                 CGSize(width: 760, height: 490)),
+                }.frame(height: MixerView.stripHeight(buses: session.song.buses.count))
+                 .padding(6).background(Theme.background).environment(\.continuousEdit, session.continuousEdit)),
+                 CGSize(width: 900, height: MixerView.stripHeight(buses: song.buses.count) + 12)),
             ]
             // The narrowest header column, with two tracks selected.
             session.selectTrack(song.tracks[1].id, extend: false)
@@ -263,7 +272,7 @@ enum SelfTest {
                 pending.removeFirst()
                 next.1(&song)
                 audio.sync(song)
-                waitForPlugins(audio, song.tracks.flatMap(\.inserts) + song.master.inserts)
+                waitForPlugins(audio, song.tracks.flatMap(\.inserts) + song.master.inserts + song.buses.flatMap(\.inserts))
                 audio.sync(song)
             }
             transport.fill(throughPlayerFrame: Int64(data.count) + 16384)
@@ -690,6 +699,102 @@ enum SelfTest {
             let level = mix.window(t + 0.1, t + 0.4).rms
             try check(level > 0.1, String(format: "the track keeps playing after %@ (level %.3f)", what, level))
         }
+        print("Effect buses")
+        // A song from before buses: its built-in reverb and delay become two buses with the same settings and sends.
+        let oldJSON = #"{"name":"Old","tempo":100,"tracks":[{"name":"V","strip":{"reverbSend":0.3,"delaySend":0.5}},{"name":"G"}],"#
+            + #""master":{"volumeDB":-1,"reverbRoom":"hall","reverbReturnDB":-4,"delayDivision":"eighth","delayFeedback":45,"delayReturnDB":-1}}"#
+        let converted = try JSONDecoder().decode(Song.self, from: Data(oldJSON.utf8))
+        let cRev = converted.buses.first, cDel = converted.buses.last
+        try check(converted.buses.count == 2 && cRev?.name == "Reverb" && cRev?.returnDB == -4
+                  && cRev?.inserts.first?.subType == kAudioUnitSubType_MatrixReverb && cRev?.inserts.first?.preset == ReverbRoom.hall.factoryPreset
+                  && cDel?.name == "Delay" && cDel?.returnDB == -1 && cDel?.inserts.first?.isAppleDelay == true
+                  && cDel?.inserts.first?.tempoSync == .eighth && cDel?.inserts.first?.params?[2] == 45,
+                  "an old song's reverb and delay become Reverb and Delay buses with the same settings")
+        try check(converted.tracks[0].strip.sends == [cRev!.id: 0.3, cDel!.id: 0.5] && converted.tracks[1].strip.sends.isEmpty
+                  && converted.master.volumeDB == -1,
+                  "and each track's reverb and delay sends follow")
+        try check(Song.newIdea().buses.map(\.name) == ["Reverb", "Delay"], "new songs start with a Reverb and a Delay bus")
+
+        // A send doubles the track into the mix through an empty bus; muting the bus or filtering it takes that away.
+        var bussed = song
+        bussed.tracks = [track]
+        bussed.master.inserts = []
+        var plain = Bus(name: "Plain")
+        bussed.buses = [plain]
+        mix = try render(bussed, audio: audio, dir: dir, length: 3, name: "bus-none.wav")
+        let dry = mix.window(1.5, 2.5).rms
+        bussed.tracks[0].strip.sends[plain.id] = 1
+        mix = try render(bussed, audio: audio, dir: dir, length: 3, name: "bus-send.wav")
+        let sent = mix.window(1.5, 2.5).rms
+        print(String(format: "  dry %.4f, with a full send %.4f", dry, sent))
+        try check(dry > 0.1 && abs(sent / dry - 2) < 0.15, "a full send to an empty bus doubles the level")
+        try check(audio.buses[plain.id]?.input != nil && audio.tracks[track.id]?.sendBuses[plain.id] != nil, "the track's strip feeds the bus")
+        bussed.buses[0].mute = true
+        mix = try render(bussed, audio: audio, dir: dir, length: 3, name: "bus-muted.wav")
+        try check(abs(mix.window(1.5, 2.5).rms / dry - 1) < 0.05, "muting the bus takes it out of the mix")
+        bussed.buses[0].mute = false
+        bussed.buses[0].returnDB = -60
+        mix = try render(bussed, audio: audio, dir: dir, length: 3, name: "bus-down.wav")
+        try check(abs(mix.window(1.5, 2.5).rms / dry - 1) < 0.05, "turning its return down does too")
+        bussed.buses[0].returnDB = 0
+        plain.inserts = [PluginSlot(name: "AUHipass", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                    subType: kAudioUnitSubType_HighPassFilter, manufacturerCode: kAudioUnitManufacturer_Apple)]
+        bussed.buses[0].inserts = plain.inserts   // high-pass at 6.9 kHz: almost nothing of a 440 Hz tone gets through
+        audio.sync(bussed)
+        waitForPlugins(audio, plain.inserts)
+        mix = try render(bussed, audio: audio, dir: dir, length: 3, name: "bus-hipass.wav")
+        try check(audio.buses[plain.id]?.inserts == [plain.inserts[0].id] && abs(mix.window(1.5, 2.5).rms / dry - 1) < 0.1,
+                  "a bus's plugins process what's sent to it")
+
+        // The standard Reverb and Delay buses ring on after the track stops at 5 s.
+        var fxSong = Song.newIdea()
+        fxSong.tracks = [track]
+        let revID = fxSong.buses[0].id, delID = fxSong.buses[1].id, delSlot = fxSong.buses[1].inserts[0]
+        audio.sync(fxSong)
+        waitForPlugins(audio, fxSong.buses.flatMap(\.inserts))
+        mix = try render(fxSong, audio: audio, dir: dir, length: 7, name: "no-sends.wav")
+        let quiet = mix.window(5.2, 5.8).rms
+        fxSong.tracks[0].strip.sends = [revID: 0.6]
+        mix = try render(fxSong, audio: audio, dir: dir, length: 7, name: "reverb-bus.wav")
+        let tail = mix.window(5.2, 5.8).rms
+        fxSong.tracks[0].strip.sends = [delID: 0.6]
+        mix = try render(fxSong, audio: audio, dir: dir, length: 7, name: "delay-bus.wav")
+        let echo = mix.window(5.0, 5.6).rms
+        print(String(format: "  after the track: dry %.5f, reverb %.5f, delay %.5f", quiet, tail, echo))
+        try check(quiet < 0.0005 && tail > 0.003, "the Reverb bus leaves a tail")
+        try check(echo > 0.003, "the Delay bus echoes")
+        let delayTime = { audio.unit(delSlot.id)?.auAudioUnit.parameterTree?.parameter(withAddress: 1)?.value ?? 0 }
+        try check(abs(delayTime() - 0.375) < 0.001, String(format: "its delay is a dotted eighth at 120 BPM (%.3f s)", delayTime()))
+        fxSong.tempo = 60
+        audio.sync(fxSong)
+        try check(abs(delayTime() - 0.75) < 0.001, "and follows a tempo change")
+
+        // Buses added and removed while the song plays: the tracks keep playing.
+        var busLive = song
+        busLive.tracks = [track]
+        busLive.master.inserts = []
+        busLive.buses = []
+        let liveBus = Bus(name: "Live"), secondBus = Bus(name: "Two")
+        let busHP = PluginSlot(name: "AUHipass", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                               subType: kAudioUnitSubType_HighPassFilter, manufacturerCode: kAudioUnitManufacturer_Apple)
+        // Each change and the level it should leave, against the track on its own: a half send through an open bus
+        // adds half again; the high-pass (at 6.9 kHz) takes that bus's share away.
+        let busChanges: [(Double, String, Double, (inout Song) -> Void)] = [
+            (1.4, "adding a bus and a send to it", 1.5, { $0.buses = [liveBus]; $0.tracks[0].strip.sends[liveBus.id] = 0.5 }),
+            (1.9, "adding a plugin on the bus", 1.0, { $0.buses[0].inserts = [busHP] }),
+            (2.4, "adding a second bus with a send", 1.5, { $0.buses.append(secondBus); $0.tracks[0].strip.sends[secondBus.id] = 0.5 }),
+            (2.9, "removing the first bus", 1.5, { $0.buses.removeFirst(); $0.tracks[0].strip.sends[liveBus.id] = nil }),
+            (3.4, "removing the last bus", 1.0, { $0.buses = []; $0.tracks[0].strip.sends = [:] }),
+        ]
+        mix = try renderChanging(busLive, changes: busChanges.map { ($0.0, $0.3) }, audio: audio, dir: dir, length: 4)
+        let alone = mix.window(1.0, 1.3).rms
+        for (t, what, expected, _) in busChanges {
+            let level = mix.window(t + 0.15, t + 0.45).rms / alone
+            try check(abs(level - expected) < 0.1,
+                      String(format: "after %@ during playback the level is %.2f× (expected %.1f×)", what, level, expected))
+        }
+        try check(audio.buses.isEmpty && audio.tracks[track.id]?.sendBuses.isEmpty == true, "removed buses are gone from the engine")
+
         // The track's low-pass was released above; reload it with the settings the rebuild test expects.
         audio.sync(song)
         waitForPlugins(audio, [lowpass])
@@ -974,7 +1079,7 @@ enum SelfTest {
             keysT.takes = [Take(name: "t", start: 0, duration: 2, notes: [MIDINote(pitch: 60, velocity: 100, start: 0, duration: 1)])]
             keysT.assign(takeID: keysT.takes[0].id, over: keysT.takes[0].range)
             keysT.volumeAuto = [AutoPoint(time: 0, value: -6)]
-            keysT.strip.reverbSend = 0.4
+            keysT.strip.sends[setup.buses[0].id] = 0.4
             keysT.inserts = [PluginSlot(name: "Comp", manufacturer: "X", type: 1, subType: 2, manufacturerCode: 3, state: Data([1, 2, 3]))]
             setup.tracks.append(keysT)
             setup.markers = [Marker(name: "Verse", position: 4)]
@@ -985,9 +1090,13 @@ enum SelfTest {
                       "New Song starts from the saved setup (tracks, tempo, count-in), without markers")
             try check(synth?.takes.isEmpty == true && synth?.comp.isEmpty == true && synth?.volumeAuto.isEmpty == true,
                       "recordings and automation are left out")
-            try check(synth?.external?.deviceName == "Prophet" && synth?.external?.channel == 3 && synth?.strip.reverbSend == 0.4
+            try check(synth?.external?.deviceName == "Prophet" && synth?.external?.channel == 3
                       && synth?.inserts.first?.state == Data([1, 2, 3]),
                       "instrument (external MIDI), strip and plugin settings carry over")
+            try check(fresh.buses.map(\.name) == setup.buses.map(\.name) && fresh.buses[0].id != setup.buses[0].id
+                      && fresh.buses[0].inserts[0].id != setup.buses[0].inserts[0].id
+                      && synth?.strip.sends == [fresh.buses[0].id: 0.4],
+                      "buses carry over with new IDs, and the sends follow them")
             let again = ProjectStore.newSong()
             try check(synth?.id != keysT.id && again.tracks.last?.id != synth?.id && synth?.inserts.first?.id != keysT.inserts.first?.id
                       && fresh.id != again.id, "every new song gets fresh IDs")
@@ -1092,12 +1201,14 @@ enum SelfTest {
             full.loopEnabled = true; full.punch = TimeRange(start: 3, end: 4); full.punchEnabled = true
             full.clickEnabled = false; full.clickOnlyWhileRecording = true; full.clickVolume = 0.3; full.countInBars = 2
             full.autoArm = .nextTrack; full.markers = [Marker(name: "M", position: 2)]
-            full.master = MasterSettings(volumeDB: -3, limiterOn: false, reverbRoom: .hall, reverbReturnDB: -1,
-                                         delayDivision: .eighth, delayFeedback: 12, delayReturnDB: -2)
+            full.master = MasterSettings(volumeDB: -3, limiterOn: false)
+            full.buses = [Bus(name: "B", inserts: [PluginSlot(name: "D", manufacturer: "Apple", type: 1, subType: 2, manufacturerCode: 3,
+                                                              preset: 4, params: [0: 100, 2: 12], tempoSync: .sixteenth)],
+                              returnDB: -2, mute: true)]
             var ft = Track(name: "T", kind: .midi, colorIndex: 2, channels: 1, inputChannel: 3, armed: true, mute: true, solo: true,
                            showTakes: true, program: 5, monitor: true, autoRead: false, showAutomation: true, autoParam: .pan)
             ft.strip = ChannelStrip(volumeDB: -1, pan: 0.2, eqOn: false, hpfOn: true, lowGain: 1, midGain: 2, midFreq: 900, highGain: 3,
-                                    compOn: true, compThreshold: -9, compMakeup: 5, reverbSend: 0.1, delaySend: 0.2)
+                                    compOn: true, compThreshold: -9, compMakeup: 5, sends: [full.buses[0].id: 0.2])
             ft.takes = [Take(name: "K", fileName: "f.caf", fileOffset: 0.5, start: 1, duration: 2, notes: [MIDINote(pitch: 60, velocity: 90, start: 0.1, duration: 0.2)])]
             ft.comp = [CompSegment(takeID: ft.takes[0].id, start: 1, end: 2, offset: 0.25, fadeIn: 0.1, fadeOut: 0.2)]
             ft.volumeAuto = [AutoPoint(time: 1, value: -2)]
@@ -1112,7 +1223,8 @@ enum SelfTest {
             try check(round == full, "every saved field survives a save and load")
             let sparse = try JSONDecoder().decode(Song.self, from: Data(#"{"name":"Old","future":1,"tracks":[{"name":"T","strip":{"pan":0.5},"takes":[{"start":1}]}],"master":{"reverbRoom":"from-the-future"}}"#.utf8))
             try check(sparse.name == "Old" && sparse.tempo == 120 && sparse.tracks[0].strip.pan == 0.5 && sparse.tracks[0].strip.midFreq == 1000
-                      && sparse.tracks[0].takes[0].start == 1 && sparse.master.reverbRoom == .plate,
+                      && sparse.tracks[0].takes[0].start == 1 && sparse.buses.map(\.name) == ["Reverb", "Delay"]
+                      && sparse.buses[0].inserts[0].preset == ReverbRoom.plate.factoryPreset,
                       "songs with missing or unknown fields still open")
             try check(ProjectStore.sanitize(".hidden") == "hidden" && ProjectStore.sanitize("...") == "Untitled" && ProjectStore.sanitize("a/b") == "a-b",
                       "names can't create hidden folders or paths")

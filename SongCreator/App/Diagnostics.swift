@@ -407,7 +407,7 @@ enum PluginTest {
                 check(p > 0.05, String(format: "the track keeps playing after %@ (level %.2f)", what, p))
             }
             func added(_ owner: UUID) {
-                let slots = owner == Song.masterID ? session.song.master.inserts : session.song.tracks[0].inserts
+                let slots = session.inserts(of: owner)
                 spin(15) { slots.allSatisfy { session.audio.unit($0.id) != nil || session.audio.pluginErrors[$0.id] != nil } }
             }
             let fx2 = effects.dropFirst().first ?? fx
@@ -426,6 +426,20 @@ enum PluginTest {
             playing("adding \(fx.name) on the master")
             session.removeInsert(session.song.master.inserts[0].id, from: Song.masterID)
             playing("removing it from the master")
+            // An effect bus added while playing: the track's send reaches it, and its plugin.
+            session.addBus()
+            let bid = session.song.buses.last!.id
+            session.updateTrack(tid, undoable: false) { $0.strip.sends[bid] = 0.8 }
+            spin(0.6)
+            check(session.audio.meters.level(bid) > 0.05,
+                  String(format: "a bus added during playback gets the track's send (level %.2f)", session.audio.meters.level(bid)))
+            session.addInsert(fx, to: bid); added(bid)
+            playing("adding \(fx.name) on the bus")
+            check(session.audio.buses[bid]?.inserts.count == 1 && session.audio.meters.level(bid) > 0.05,
+                  "\(fx.name) on the bus is wired in and passes the send")
+            session.removeBus(bid)
+            playing("removing the bus")
+            check(session.audio.buses[bid] == nil, "the removed bus is gone from the engine")
             session.stop()
             tapped?.removeTap(onBus: 0)
             session.close()
