@@ -834,54 +834,121 @@ final class AudioEngine {
     /// Song position the automation was last evaluated at.
     private(set) var automationTime: Double = 0
 
-    private func setLevel(_ track: Track, _ n: TrackNodes, anySolo: Bool, at t: Double) {
-        let audible = !track.mute && (!anySolo || track.solo)
-        var db = track.strip.volumeDB, pan = track.strip.pan
-        if track.autoRead {
-            db = Track.evaluate(track.volumeAuto, at: t) ?? db
-            pan = Track.evaluate(track.panAuto, at: t) ?? pan
+    /// What the automation timer may touch. It runs on the transport's queue while the node tables change on
+    /// the main thread, so applyParameters (on main) hands it this copy.
+    private struct AutoLinks {
+        var tracks: [UUID: TrackNodes] = [:]
+        /// Each track's links into the buses it sends to: bus ID → (bus input, input number).
+        var sends: [UUID: [UUID: (AVAudioMixerNode, AVAudioNodeBus)]] = [:]
+        var busOutputs: [UUID: AVAudioMixerNode] = [:]
+        /// Automated plugin parameters of loaded plugins, and whether each one steps rather than slides.
+        var params: [AutoTarget: (param: AUParameter, step: Bool)] = [:]
+    }
+    private let autoLock = NSLock()
+    private var autoLinks = AutoLinks()
+
+    private func makeAutoLinks(_ song: Song) -> AutoLinks {
+        var links = AutoLinks()
+        links.tracks = tracks
+        for (id, n) in tracks {
+            var s: [UUID: (AVAudioMixerNode, AVAudioNodeBus)] = [:]
+            for (bus, b) in n.sendBuses { if let input = buses[bus]?.input { s[bus] = (input, b) } }
+            links.sends[id] = s
         }
-        n.strip.outputVolume = audible ? AudioEngine.gain(db) : 0
-        n.strip.destination(forMixer: masterMixer, bus: n.masterBus)?.pan = Float(pan)
+        links.busOutputs = buses.mapValues(\.output)
+        for c in song.pluginCurves {
+            guard let p = units[c.slot]?.auAudioUnit.parameterTree?.parameter(withAddress: c.address) else { continue }
+            links.params[.plugin(c.slot, c.address)] = (p, AudioEngine.steps(p))
+        }
+        return links
     }
 
-    /// Apply volume/pan automation for song time `t`. Cheap; called every few ms while playing.
+    /// Parameters that pick from a list or switch on and off jump between automation points.
+    static func steps(_ p: AUParameter) -> Bool {
+        p.unit == .boolean || p.unit == .indexed || p.valueStrings != nil
+    }
+
+    /// Set a track's strip, EQ, compressor and sends to `live`. Only what differs is set: this runs every
+    /// few milliseconds while automation plays.
+    private func apply(_ live: Track.Live, to n: TrackNodes, audible: Bool,
+                       sends: [UUID: (AVAudioMixerNode, AVAudioNodeBus)]) {
+        let s = live.strip
+        let volume = audible ? AudioEngine.gain(s.volumeDB) : 0
+        if n.strip.outputVolume != volume { n.strip.outputVolume = volume }
+        if let d = n.strip.destination(forMixer: masterMixer, bus: n.masterBus), d.pan != Float(s.pan) { d.pan = Float(s.pan) }
+        for (bus, (input, b)) in sends {
+            let level = Float(s.sends[bus] ?? 0)
+            if let d = n.strip.destination(forMixer: input, bus: b), d.volume != level { d.volume = level }
+        }
+
+        let eqBypass = !s.eqOn && !s.hpfOn
+        if n.eq.bypass != eqBypass { n.eq.bypass = eqBypass }
+        let bands = n.eq.bands
+        if bands[0].bypass != !s.hpfOn { bands[0].bypass = !s.hpfOn }
+        for b in bands[1...] where b.bypass != !s.eqOn { b.bypass = !s.eqOn }
+        func set(_ band: AVAudioUnitEQFilterParameters, gain: Double) { if band.gain != Float(gain) { band.gain = Float(gain) } }
+        set(bands[1], gain: s.lowGain)
+        set(bands[2], gain: s.midGain)
+        set(bands[3], gain: s.highGain)
+        if bands[2].frequency != Float(s.midFreq) { bands[2].frequency = Float(s.midFreq) }
+
+        if n.comp.bypass != !s.compOn { n.comp.bypass = !s.compOn }
+        setParam(n.comp, 0, s.compThreshold)
+        setParam(n.comp, 6, s.compMakeup)
+    }
+
+    private func applyMaster(_ m: Song.LiveMaster, _ links: AutoLinks) {
+        let volume = AudioEngine.gain(m.volumeDB)
+        if masterFader.outputVolume != volume { masterFader.outputVolume = volume }
+        if limiter.bypass != !m.limiterOn { limiter.bypass = !m.limiterOn }
+        for (id, output) in links.busOutputs {
+            let level = m.busMute[id] == true ? 0 : AudioEngine.gain(m.busReturnDB[id] ?? 0)
+            if output.outputVolume != level { output.outputVolume = level }
+        }
+    }
+
+    private func applyPlugins(_ song: Song, at t: Double, _ links: AutoLinks) {
+        for c in song.pluginCurves {
+            guard let (p, step) = links.params[.plugin(c.slot, c.address)],
+                  let v = Automation.evaluate(c.points, at: t, step: step) else { continue }
+            let value = AUValue(max(Double(p.minValue), min(Double(p.maxValue), v)))
+            if abs(p.value - value) > 1e-6 { p.value = value }
+        }
+    }
+
+    /// Follow the automation at song time `t`. Cheap; called every few ms while playing, from the transport's queue.
     func applyAutomation(_ song: Song, at t: Double) {
         automationTime = t
-        let anySolo = song.tracks.contains { $0.solo }
-        for track in song.tracks where track.hasAutomation {
-            if let n = tracks[track.id] { setLevel(track, n, anySolo: anySolo, at: t) }
+        autoLock.lock(); let links = autoLinks; autoLock.unlock()
+        let live = song.tracks.map { $0.live(at: t) }
+        let anySolo = live.contains { $0.solo }
+        // Automated solo changes what every other track plays, not just its own.
+        let soloMoves = song.tracks.contains { $0.auto.isActive && $0.auto.curves[.solo] != nil }
+        for (track, l) in zip(song.tracks, live) where track.auto.isActive || soloMoves {
+            guard let n = links.tracks[track.id] else { continue }
+            apply(l, to: n, audible: !l.mute && (!anySolo || l.solo), sends: links.sends[track.id] ?? [:])
         }
+        if song.master.auto.isActive { applyMaster(song.liveMaster(at: t), links) }
+        applyPlugins(song, at: t, links)
     }
 
     func applyParameters(_ song: Song) {
-        let anySolo = song.tracks.contains { $0.solo }
-        for track in song.tracks {
+        let links = makeAutoLinks(song)
+        autoLock.lock(); autoLinks = links; autoLock.unlock()
+        // Settings are taken where the automation last left them, so a mixer move mid-song doesn't jump an
+        // automated setting back to its static value until the next tick.
+        let t = automationTime
+        let live = song.tracks.map { $0.live(at: t) }
+        let anySolo = live.contains { $0.solo }
+        for (track, l) in zip(song.tracks, live) {
             guard let n = tracks[track.id] else { continue }
-            let s = track.strip
-            setLevel(track, n, anySolo: anySolo, at: automationTime)
-            for (id, bus) in n.sendBuses {
-                guard let input = buses[id]?.input else { continue }
-                n.strip.destination(forMixer: input, bus: bus)?.volume = Float(s.sends[id] ?? 0)
-            }
+            apply(l, to: n, audible: !l.mute && (!anySolo || l.solo), sends: links.sends[track.id] ?? [:])
+            setParam(n.comp, 1, 6)
             // Gear coming back from a MIDI track isn't a mic, so feedback protection doesn't apply to it.
             // Only the armed track listens: new tracks default to monitoring, and every unarmed one playing the
             // same input as well would stack it up louder and louder.
             let wanted = track.kind == .audio ? track.monitor && track.armed && !monitorMuted : n.monitorMode != .none
             n.monitorReader?.enabled.store(wanted && liveInput, ordering: .relaxed)
-
-            n.eq.bypass = !s.eqOn && !s.hpfOn
-            n.eq.bands[0].bypass = !s.hpfOn
-            for b in n.eq.bands[1...] { b.bypass = !s.eqOn }
-            n.eq.bands[1].gain = Float(s.lowGain)
-            n.eq.bands[2].gain = Float(s.midGain)
-            n.eq.bands[2].frequency = Float(s.midFreq)
-            n.eq.bands[3].gain = Float(s.highGain)
-
-            n.comp.bypass = !s.compOn
-            setParam(n.comp, 0, s.compThreshold)
-            setParam(n.comp, 1, 6)
-            setParam(n.comp, 6, s.compMakeup)
 
             if let sampler = n.sampler, n.loadedProgram != track.program {
                 n.loadedProgram = track.program
@@ -894,18 +961,16 @@ final class AudioEngine {
             }
         }
 
-        let m = song.master
-        masterFader.outputVolume = AudioEngine.gain(m.volumeDB)
-        limiter.bypass = !m.limiterOn
+        applyMaster(song.liveMaster(at: t), links)
         setParam(limiter, 2, 0) // pre-gain
-        for bus in song.buses {
-            buses[bus.id]?.output.outputVolume = bus.mute ? 0 : AudioEngine.gain(bus.returnDB)
-        }
+        applyPlugins(song, at: t, links)
         // Apple's delay, synced to the tempo where the slot asks for it.
         let slots = song.buses.flatMap(\.inserts) + song.master.inserts + song.tracks.flatMap(\.inserts)
         for slot in slots where slot.isAppleDelay {
             guard let division = slot.tempoSync,
                   let time = units[slot.id]?.auAudioUnit.parameterTree?.parameter(withAddress: 1) else { continue }
+            // An automated delay time wins over the sync.
+            guard song.pluginCurves.first(where: { $0.slot == slot.id && $0.address == 1 }) == nil else { continue }
             let wanted = AUValue(min(2, division.beats * song.secondsPerBeat))
             if abs(time.value - wanted) > 0.0001 { time.value = wanted }
         }

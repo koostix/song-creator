@@ -440,6 +440,42 @@ enum PluginTest {
             session.removeBus(bid)
             playing("removing the bus")
             check(session.audio.buses[bid] == nil, "the removed bus is gone from the engine")
+
+            // Automation drawn during playback: a parameter of the plugin follows its curve, and mute switches
+            // the track off on time.
+            session.addInsert(fx, to: tid); added(tid)
+            let aslot = session.song.tracks[0].inserts.last!.id
+            if let params = session.automatableParameters(aslot),
+               let p = params.first(where: { !AudioEngine.steps($0) && $0.maxValue > $0.minValue }) {
+                let now = session.transport.currentPosition() ?? 0
+                let lo = Double(p.minValue), hi = Double(p.maxValue), start = p.value
+                let curve = [AutoPoint(time: 0, value: lo), AutoPoint(time: now + 0.5, value: lo), AutoPoint(time: now + 4.5, value: hi)]
+                session.updateAutomation(tid) { $0.set(.plugin(aslot, p.address), curve) }
+                var samples: [(Double, Double)] = []
+                for _ in 0..<4 {
+                    spin(1)
+                    let t = session.transport.currentPosition() ?? 0
+                    samples.append((Double(p.value), Automation.evaluate(curve, at: t)!))
+                }
+                let off = samples.map { abs($0.0 - $0.1) / (hi - lo) }.max() ?? 1
+                let rising = zip(samples, samples.dropFirst()).allSatisfy { $1.0 > $0.0 }
+                check(rising && off < 0.1,
+                      String(format: "%@ follows its automation during playback (%@ rising, off by %.0f%% at most)",
+                             p.displayName, samples.map { String(format: "%.2f", $0.0) }.joined(separator: " → "), off * 100))
+                session.updateAutomation(tid) { $0.set(.plugin(aslot, p.address), []) }
+                p.value = start   // where it was, or the tone may now be filtered away
+            } else {
+                lines.append("  (\(fx.name) has no smooth parameter to automate)")
+            }
+            playing("automating \(fx.name)")
+            let muteAt = (session.transport.currentPosition() ?? 0) + 0.5
+            session.updateAutomation(tid) { $0.set(.mute, [AutoPoint(time: 0, value: 0), AutoPoint(time: muteAt, value: 1)]) }
+            spin(0.3)
+            let beforeMute = session.audio.meters.level(tid)
+            spin(1.5)
+            let afterMute = session.audio.meters.level(tid)   // the meter falls away over a few hundred ms
+            check(beforeMute > 0.05 && afterMute < 0.01,
+                  String(format: "mute automation turns the track off on time (%.3f → %.4f)", beforeMute, afterMute))
             session.stop()
             tapped?.removeTap(onBus: 0)
             session.close()

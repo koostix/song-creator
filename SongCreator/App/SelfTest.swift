@@ -38,6 +38,15 @@ enum SelfTest {
             song.tracks[0].strip.sends = [song.buses[0].id: 0.35, song.buses[2].id: 0.6]
             song.tracks[1].strip.sends = [song.buses[1].id: 0.2]
             song.loop = TimeRange(start: 0, end: 8)
+            let rev = song.buses[0].id
+            song.tracks[0].auto.show = true
+            song.tracks[0].auto.lanes = [.volume, .send(rev), .mute, .midFreq]
+            song.tracks[0].auto.set(.volume, [AutoPoint(time: 0, value: -6), AutoPoint(time: 2, value: 0), AutoPoint(time: 5, value: -12)])
+            song.tracks[0].auto.set(.send(rev), [AutoPoint(time: 1, value: 0.1), AutoPoint(time: 4, value: 0.8)])
+            song.tracks[0].auto.set(.mute, [AutoPoint(time: 0, value: 0), AutoPoint(time: 3, value: 1), AutoPoint(time: 4, value: 0)])
+            song.master.auto.show = true
+            song.master.auto.lanes = [.busReturn(rev), .limiterOn]
+            song.master.auto.set(.busReturn(rev), [AutoPoint(time: 0, value: -10), AutoPoint(time: 6, value: 0)])
             let model = AppModel()
             let session = Session(projectURL: project, song: song)
             let savedJam = Prefs.jamMode   // restored before exit(), which skips defer blocks
@@ -57,6 +66,11 @@ enum SelfTest {
             // Scroll views don't render offscreen, so draw track rows and mixer strips directly.
             session.showMixer = false
             let parts: [(String, AnyView, CGSize)] = [
+                ("automation", AnyView(VStack(spacing: 0) {
+                    TrackRow(session: session, track: session.song.tracks[0])
+                    Divider().overlay(Color.black.opacity(0.6))
+                    MasterRow(session: session)
+                }.background(Theme.lane)), CGSize(width: 1000, height: 500)),
                 ("tracks", AnyView(VStack(spacing: 0) {
                     ForEach(session.song.tracks) { t in
                         TrackRow(session: session, track: t)
@@ -381,12 +395,43 @@ enum SelfTest {
 
         print("Automation curve")
         let pts = [AutoPoint(time: 1, value: -10), AutoPoint(time: 3, value: 0)]
-        try check(Track.evaluate(pts, at: 0) == -10 && Track.evaluate(pts, at: 2) == -5 && Track.evaluate(pts, at: 9) == 0, "linear interpolation")
+        try check(Automation.evaluate(pts, at: 0) == -10 && Automation.evaluate(pts, at: 2) == -5 && Automation.evaluate(pts, at: 9) == 0, "linear interpolation")
+        try check(Automation.evaluate(pts, at: 2, step: true) == -10 && Automation.evaluate(pts, at: 3, step: true) == 0,
+                  "switches hold each point's value until the next one")
+        for t: AutoTarget in [.volume, .midFreq, .send(UUID()), .busReturn(UUID()), .busMute(UUID()), .plugin(UUID(), 4_294_967_296)] {
+            try check(AutoTarget(key: t.key) == t, "\(t.key.prefix(9)) is saved by name and read back")
+        }
+        let oldAuto = #"{"name":"T","volumeAuto":[{"time":1,"value":-3}],"panAuto":[{"time":2,"value":0.5}],"autoRead":false,"showAutomation":true,"autoParam":"pan"}"#
+        let oldA = try JSONDecoder().decode(Track.self, from: Data(oldAuto.utf8)).auto
+        try check(oldA.points(.volume).first?.value == -3 && oldA.points(.pan).first?.value == 0.5 && !oldA.read && oldA.show
+                  && oldA.lanes == [.pan], "volume and pan automation from older songs carry over")
+        var liveT = Track(name: "L")
+        let busA = UUID()
+        liveT.auto.set(.mute, [AutoPoint(time: 0, value: 0), AutoPoint(time: 2, value: 1)])
+        liveT.auto.set(.midGain, [AutoPoint(time: 0, value: -12), AutoPoint(time: 2, value: 12)])
+        liveT.auto.set(.send(busA), [AutoPoint(time: 0, value: 0), AutoPoint(time: 2, value: 1)])
+        let at1 = liveT.live(at: 1), at3 = liveT.live(at: 3)
+        try check(!at1.mute && at3.mute && at1.strip.midGain == 0 && at1.strip.sends[busA] == 0.5 && at3.strip.sends[busA] == 1,
+                  "a track's automated settings at a point in time")
+        liveT.auto.read = false
+        try check(!liveT.live(at: 3).mute && liveT.live(at: 3).strip.midGain == 0, "READ off leaves the settings alone")
+        var pruned = Song(name: "P")
+        let gone = UUID(), keptBus = Bus(name: "Kept")
+        pruned.buses = [keptBus]
+        pruned.tracks = [Track(name: "T")]
+        pruned.tracks[0].auto.set(.send(gone), [AutoPoint(time: 0, value: 1)])
+        pruned.tracks[0].auto.set(.send(keptBus.id), [AutoPoint(time: 0, value: 1)])
+        pruned.tracks[0].auto.set(.plugin(gone, 0), [AutoPoint(time: 0, value: 1)])
+        pruned.tracks[0].auto.lanes = [.plugin(gone, 0)]
+        pruned.master.auto.set(.busReturn(gone), [AutoPoint(time: 0, value: 1)])
+        pruned.pruneAutomation()
+        try check(Array(pruned.tracks[0].auto.curves.keys) == [.send(keptBus.id)] && pruned.tracks[0].auto.lanes == [.volume]
+                  && pruned.master.auto.isEmpty, "automation of removed buses and plugins goes with them")
 
         print("Old song files")
         let legacy = #"{"id":"6E0B6C2E-0000-4000-8000-000000000001","name":"Old","takes":[],"comp":[{"takeID":"6E0B6C2E-0000-4000-8000-000000000002","start":1,"end":2}]}"#
         let old = try JSONDecoder().decode(Track.self, from: Data(legacy.utf8))
-        try check(old.comp.count == 1 && old.comp[0].offset == 0 && old.inserts.isEmpty && old.autoRead, "pre-region-editing songs still load")
+        try check(old.comp.count == 1 && old.comp[0].offset == 0 && old.inserts.isEmpty && old.auto.read, "pre-region-editing songs still load")
 
         print("Pitch detector")
         for f0 in [82.41, 196.0, 440.0, 987.8] {
@@ -562,7 +607,7 @@ enum SelfTest {
 
         var automated = moved
         automated.setFades(automated.comp[0].id, fadeIn: 0)
-        automated.volumeAuto = [AutoPoint(time: 0, value: -60), AutoPoint(time: 3.9, value: -60), AutoPoint(time: 4.0, value: 0)]
+        automated.auto.set(.volume, [AutoPoint(time: 0, value: -60), AutoPoint(time: 3.9, value: -60), AutoPoint(time: 4.0, value: 0)])
         song.tracks = [automated]
         mix = try render(song, audio: audio, dir: dir, length: 6, name: "auto.wav")
         let muted = mix.window(3.2, 3.8).rms, loud = mix.window(4.2, 4.8).rms
@@ -794,6 +839,75 @@ enum SelfTest {
                       String(format: "after %@ during playback the level is %.2f× (expected %.1f×)", what, level, expected))
         }
         try check(audio.buses.isEmpty && audio.tracks[track.id]?.sendBuses.isEmpty == true, "removed buses are gone from the engine")
+
+        print("Automating any setting")
+        // Each case changes one setting at 2 s (the 440 Hz part of the track) and gives the level after it
+        // against before it (a negative number: anything under that).
+        var autoBase = song
+        autoBase.tracks = [track]
+        autoBase.master.inserts = []
+        autoBase.master.limiterOn = false   // a +12 dB boost would otherwise be held back by it
+        let autoBus = Bus(name: "Auto")
+        autoBase.buses = [autoBus]
+        let autoLP = PluginSlot(name: "AULowpass", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                subType: kAudioUnitSubType_LowPassFilter, manufacturerCode: kAudioUnitManufacturer_Apple)
+        let twin: Track = { var t = track; t.id = UUID(); t.name = "Twin"; return t }()
+        func jump(_ from: Double, _ to: Double) -> [AutoPoint] {
+            [AutoPoint(time: 0, value: from), AutoPoint(time: 1.95, value: from), AutoPoint(time: 2.0, value: to)]
+        }
+        // What the mid band's +12 dB does to the tone with no automation: the automated boost should match it.
+        var eqStatic = autoBase
+        eqStatic.tracks[0].strip.midFreq = 440
+        let flat = try render(eqStatic, audio: audio, dir: dir, length: 3, name: "eq-flat.wav").window(1.2, 1.8).rms
+        eqStatic.tracks[0].strip.midGain = 12
+        let eqBoost = try render(eqStatic, audio: audio, dir: dir, length: 3, name: "eq-boost.wav").window(1.2, 1.8).rms / flat
+        let autoCases: [(String, Double, (inout Song) -> Void)] = [
+            ("send automation opens a send", 2, { $0.tracks[0].auto.set(.send(autoBus.id), jump(0, 1)) }),
+            ("mute automation mutes", 0, { $0.tracks[0].auto.set(.mute, jump(0, 1)) }),
+            ("solo automation on another track leaves only that one", 0.5,
+             { $0.tracks.append(twin); $0.tracks[1].auto.set(.solo, jump(0, 1)) }),
+            ("EQ automation boosts the mid band as much as the knob does", eqBoost,
+             { $0.tracks[0].strip.midFreq = 440; $0.tracks[0].auto.set(.midGain, jump(0, 12)) }),
+            ("EQ frequency automation moves the band onto the tone", eqBoost,
+             { $0.tracks[0].strip.midGain = 12; $0.tracks[0].auto.set(.midFreq, jump(5000, 440)) }),
+            ("switching the EQ off by automation", 1 / eqBoost,
+             { $0.tracks[0].strip.midFreq = 440; $0.tracks[0].strip.midGain = 12; $0.tracks[0].auto.set(.eqOn, jump(1, 0)) }),
+            ("master volume automation", 0.25, { $0.master.auto.set(.volume, jump(0, -12)) }),
+            ("limiter automation holds a loud mix down", -0.85, { $0.master.volumeDB = 12; $0.master.auto.set(.limiterOn, jump(0, 1)) }),
+            ("compressor makeup automation", 2,
+             { $0.tracks[0].strip.compOn = true; $0.tracks[0].strip.compThreshold = 0; $0.tracks[0].auto.set(.compMakeup, jump(0, 6)) }),
+            ("bus return automation", 2, { $0.tracks[0].strip.sends[autoBus.id] = 1; $0.master.auto.set(.busReturn(autoBus.id), jump(-60, 0)) }),
+            ("bus mute automation", 0.5, { $0.tracks[0].strip.sends[autoBus.id] = 1; $0.master.auto.set(.busMute(autoBus.id), jump(0, 1)) }),
+            ("plugin parameter automation (low-pass cutoff down to 100 Hz)", -0.1,
+             { $0.tracks[0].inserts = [autoLP]; $0.tracks[0].auto.set(.plugin(autoLP.id, UInt64(kLowPassParam_CutoffFrequency)), jump(20000, 100)) }),
+        ]
+        for (i, (what, expected, change)) in autoCases.enumerated() {
+            var s = autoBase
+            change(&s)
+            audio.sync(s)
+            waitForPlugins(audio, s.tracks.flatMap(\.inserts))
+            mix = try render(s, audio: audio, dir: dir, length: 3, name: "auto-\(i).wav")
+            let before = mix.window(1.2, 1.8).rms, after = mix.window(2.2, 2.8).rms
+            let ratio = after / max(before, 1e-9)
+            let ok = expected == 0 ? after < 0.001 && before > 0.1
+                : expected < 0 ? ratio < -expected && before > 0.1
+                : abs(ratio / expected - 1) < 0.12
+            try check(ok, String(format: "%@ (%.2f× after, expected %@%.2f×)", what, ratio, expected < 0 ? "under " : "", abs(expected)))
+        }
+        var readOff = autoBase
+        readOff.tracks[0].auto.set(.mute, jump(0, 1))
+        readOff.tracks[0].auto.read = false
+        mix = try render(readOff, audio: audio, dir: dir, length: 3, name: "auto-read-off.wav")
+        try check(mix.window(2.2, 2.8).rms > 0.1, "with READ off the track ignores its automation")
+        // An edit to the mix mid-song keeps automated settings where the automation has them.
+        var held = autoBase
+        held.tracks[0].auto.set(.mute, jump(1, 1))
+        audio.sync(held)
+        audio.applyAutomation(held, at: 1)
+        held.tracks[0].strip.pan = 0.3
+        audio.sync(held)
+        try check(audio.tracks[track.id]?.strip.outputVolume == 0, "a mixer move doesn't undo automation that's playing")
+        audio.applyAutomation(autoBase, at: 0)
 
         // The track's low-pass was released above; reload it with the settings the rebuild test expects.
         audio.sync(song)
@@ -1078,7 +1192,7 @@ enum SelfTest {
             keysT.external = ExternalMIDI(deviceID: 42, deviceName: "Prophet", channel: 3)
             keysT.takes = [Take(name: "t", start: 0, duration: 2, notes: [MIDINote(pitch: 60, velocity: 100, start: 0, duration: 1)])]
             keysT.assign(takeID: keysT.takes[0].id, over: keysT.takes[0].range)
-            keysT.volumeAuto = [AutoPoint(time: 0, value: -6)]
+            keysT.auto.set(.volume, [AutoPoint(time: 0, value: -6)])
             keysT.strip.sends[setup.buses[0].id] = 0.4
             keysT.inserts = [PluginSlot(name: "Comp", manufacturer: "X", type: 1, subType: 2, manufacturerCode: 3, state: Data([1, 2, 3]))]
             setup.tracks.append(keysT)
@@ -1088,7 +1202,7 @@ enum SelfTest {
             let synth = fresh.tracks.first { $0.name == "Synth" }
             try check(fresh.tracks.count == 2 && fresh.tempo == 94 && fresh.countInBars == 2 && fresh.markers.isEmpty,
                       "New Song starts from the saved setup (tracks, tempo, count-in), without markers")
-            try check(synth?.takes.isEmpty == true && synth?.comp.isEmpty == true && synth?.volumeAuto.isEmpty == true,
+            try check(synth?.takes.isEmpty == true && synth?.comp.isEmpty == true && synth?.auto.isEmpty == true,
                       "recordings and automation are left out")
             try check(synth?.external?.deviceName == "Prophet" && synth?.external?.channel == 3
                       && synth?.inserts.first?.state == Data([1, 2, 3]),
@@ -1206,13 +1320,18 @@ enum SelfTest {
                                                               preset: 4, params: [0: 100, 2: 12], tempoSync: .sixteenth)],
                               returnDB: -2, mute: true)]
             var ft = Track(name: "T", kind: .midi, colorIndex: 2, channels: 1, inputChannel: 3, armed: true, mute: true, solo: true,
-                           showTakes: true, program: 5, monitor: true, autoRead: false, showAutomation: true, autoParam: .pan)
+                           showTakes: true, program: 5, monitor: true)
             ft.strip = ChannelStrip(volumeDB: -1, pan: 0.2, eqOn: false, hpfOn: true, lowGain: 1, midGain: 2, midFreq: 900, highGain: 3,
                                     compOn: true, compThreshold: -9, compMakeup: 5, sends: [full.buses[0].id: 0.2])
             ft.takes = [Take(name: "K", fileName: "f.caf", fileOffset: 0.5, start: 1, duration: 2, notes: [MIDINote(pitch: 60, velocity: 90, start: 0.1, duration: 0.2)])]
             ft.comp = [CompSegment(takeID: ft.takes[0].id, start: 1, end: 2, offset: 0.25, fadeIn: 0.1, fadeOut: 0.2)]
-            ft.volumeAuto = [AutoPoint(time: 1, value: -2)]
-            ft.panAuto = [AutoPoint(time: 2, value: 0.5)]
+            ft.auto.set(.volume, [AutoPoint(time: 1, value: -2)])
+            ft.auto.set(.pan, [AutoPoint(time: 2, value: 0.5)])
+            ft.auto.set(.send(full.buses[0].id), [AutoPoint(time: 2, value: 0.5)])
+            ft.auto.set(.plugin(UUID(), 7), [AutoPoint(time: 3, value: 0.25)])
+            ft.auto.read = false; ft.auto.show = true; ft.auto.lanes = [.pan, .solo]
+            full.master.auto.set(.busMute(full.buses[0].id), [AutoPoint(time: 1, value: 1)])
+            full.master.auto.lanes = [.limiterOn]
             ft.inserts = [PluginSlot(name: "P", manufacturer: "X", type: 1, subType: 2, manufacturerCode: 3, bypass: true, state: Data([9]))]
             ft.instrument = PluginSlot(name: "I", manufacturer: "Y", type: 4, subType: 5, manufacturerCode: 6)
             var ext = ExternalMIDI(deviceID: 7, deviceName: "D", channel: 9); ext.audioReturn = true; ext.latencyMs = 5

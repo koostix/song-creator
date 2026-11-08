@@ -54,6 +54,8 @@ struct ArrangeView: View {
                         TrackRow(session: session, track: track)
                         Divider().overlay(Color.black.opacity(0.6))
                     }
+                    MasterRow(session: session)
+                    Divider().overlay(Color.black.opacity(0.6))
                     AddTrackRow(session: session)
                 }
             }
@@ -390,13 +392,53 @@ struct TrackRow: View {
                             .frame(height: Layout.takeHeight)
                     }
                 }
-                if track.showAutomation {
-                    AutomationLane(session: session, track: track)
-                        .frame(height: Layout.automationHeight)
+                if track.auto.show {
+                    ForEach(Array(track.auto.lanes.enumerated()), id: \.element) { i, _ in
+                        AutomationLane(session: session, owner: track.id, index: i)
+                            .frame(height: Layout.automationHeight)
+                    }
                 }
             }
         }
         .background(session.selectedTrackIDs.contains(track.id) ? Color.white.opacity(0.035) : Color.clear)
+    }
+}
+
+/// The master's automation, and the buses': master volume and limiter, each bus's return and mute, and the
+/// parameters of their plugins.
+struct MasterRow: View {
+    @Bindable var session: Session
+
+    static let height: CGFloat = 30
+
+    var body: some View {
+        let auto = session.song.master.auto
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Rectangle().fill(Color.white.opacity(0.5)).frame(width: 4)
+                Image(systemName: "slider.vertical.3").font(.system(size: 10)).foregroundStyle(Theme.dim)
+                Text("Master").font(.system(size: 12, weight: .semibold))
+                Spacer()
+                LitButton(label: "A", on: auto.show, color: .green,
+                          help: "Show automation for the master, the effect buses and their plugins") {
+                    session.updateAutomation(Song.masterID, undoable: false) { $0.show.toggle() }
+                }
+                .padding(.trailing, 8)
+            }
+            .frame(width: session.headerWidth, height: Self.height, alignment: .leading)
+            .frame(maxHeight: .infinity, alignment: .top)
+            VStack(spacing: 0) {
+                if auto.show {
+                    ForEach(Array(auto.lanes.enumerated()), id: \.element) { i, _ in
+                        AutomationLane(session: session, owner: Song.masterID, index: i)
+                            .frame(height: Layout.automationHeight)
+                    }
+                } else {
+                    Color.clear.frame(height: Self.height)
+                }
+            }
+        }
+        .background(Theme.panel.opacity(0.5))
     }
 }
 
@@ -510,8 +552,8 @@ struct MainLane: View {
         .contextMenu {
             Button(track.showTakes ? "Hide Takes" : "Show Takes") { session.updateTrack(track.id, undoable: false) { $0.showTakes.toggle() } }
                 .disabled(track.takes.isEmpty)
-            Button(track.showAutomation ? "Hide Automation" : "Show Automation") {
-                session.updateTrack(track.id, undoable: false) { $0.showAutomation.toggle() }
+            Button(track.auto.show ? "Hide Automation" : "Show Automation") {
+                session.updateTrack(track.id, undoable: false) { $0.auto.show.toggle() }
             }
             Divider()
             Button("Split at Playhead (B)") { session.selectedTrackID = track.id; session.splitAtPlayhead() }

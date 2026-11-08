@@ -50,8 +50,8 @@ enum Exporter {
         let buffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
                                       frameCapacity: engine.manualRenderingMaximumFrameCount)!
         let total = Int64(range.length * sr)
-        // Small blocks when automating so volume/pan changes land within ~10 ms.
-        let block: Int64 = song.tracks.contains(where: \.hasAutomation) ? 512 : Int64(buffer.frameCapacity)
+        // Small blocks when automating so changes land within ~10 ms.
+        let block: Int64 = song.hasAutomation ? 512 : Int64(buffer.frameCapacity)
         // The file may run at a lower rate than the engine (AAC tops out at 48 kHz): convert, or it plays slow.
         let converter = out.processingFormat.sampleRate == buffer.format.sampleRate
             ? nil : AVAudioConverter(from: buffer.format, to: out.processingFormat)

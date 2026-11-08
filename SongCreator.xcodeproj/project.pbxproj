@@ -15,6 +15,7 @@
 		44684A26F031EBF8A936C6C0 /* Diagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD71A22610AE8F3B38C8AF1A /* Diagnostics.swift */; };
 		4839EA04E0619F9CD5212EBB /* SelfTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96A78CF3153B581EA315F83F /* SelfTest.swift */; };
 		4BBD3C94D11023AC84C784CD /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60C2E33D87353CCD3F9EBD58 /* Timeline.swift */; };
+		4C5892D4F4F906E7DEE36AFE /* Automation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1541F79FD9660BCE22917AF6 /* Automation.swift */; };
 		4FEB476D1ED884A1F46EFE86 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C42F92D298C36A0D16045A4D /* Recorder.swift */; };
 		527DB89EF6BA94F47BFFAC1B /* HALIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AF5EDFC5F4F19C5873081C4 /* HALIO.swift */; };
 		566149A8A5CD8DA25D5204C1 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DD10BD901B455AE9375359F /* Transport.swift */; };
@@ -44,6 +45,7 @@
 		01D7D0F15FB4AE2B3F49E49E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		05C328AAD080BE506DDE5824 /* ProjectBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectBrowser.swift; sourceTree = "<group>"; };
 		11741F30BB1A007171669101 /* MIDIInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MIDIInput.swift; sourceTree = "<group>"; };
+		1541F79FD9660BCE22917AF6 /* Automation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Automation.swift; sourceTree = "<group>"; };
 		16EC643B67715055C5148AF0 /* Exporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Exporter.swift; sourceTree = "<group>"; };
 		27D42A465996B79DB4385450 /* Comp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Comp.swift; sourceTree = "<group>"; };
 		28CC1B8DF01DA7A67EB67E02 /* AutomationLane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationLane.swift; sourceTree = "<group>"; };
@@ -144,6 +146,7 @@
 		A7B4E790D5258B077EF76D91 /* Model */ = {
 			isa = PBXGroup;
 			children = (
+				1541F79FD9660BCE22917AF6 /* Automation.swift */,
 				27D42A465996B79DB4385450 /* Comp.swift */,
 				E39083BB8FD7A7F43B55FDF6 /* Song.swift */,
 			);
@@ -245,6 +248,7 @@
 				A75DA1F7E41CBBA032709E76 /* ArrangeView.swift in Sources */,
 				43DEB1E906D90DF615401B4D /* AudioDevices.swift in Sources */,
 				64DFE14C7A05B6A538F0A93E /* AudioEngine.swift in Sources */,
+				4C5892D4F4F906E7DEE36AFE /* Automation.swift in Sources */,
 				E7A57A99E4CA40D701A57B68 /* AutomationLane.swift in Sources */,
 				EFD3F7F2506FA77284F4A668 /* ChunkRenderer.swift in Sources */,
 				D3090913348028F36516DBCF /* Comp.swift in Sources */,

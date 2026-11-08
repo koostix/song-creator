@@ -617,6 +617,7 @@ final class Session {
         let before = song
         var s = song
         change(&s)
+        s.pruneAutomation()
         guard s != before else { return }
         undoStack.append(before)
         if undoStack.count > 200 { undoStack.removeFirst() }
@@ -645,7 +646,7 @@ final class Session {
     private func arrangementDiffers(_ a: Song, _ b: Song) -> Bool {
         a.tracks.map(\.comp) != b.tracks.map(\.comp) || a.tracks.map(\.takes) != b.tracks.map(\.takes)
             || a.loop != b.loop || a.loopEnabled != b.loopEnabled || a.tempo != b.tempo
-            || a.tracks.map(\.hasAutomation) != b.tracks.map(\.hasAutomation)
+            || a.hasAutomation != b.hasAutomation
     }
 
     private func scheduleSave() {
@@ -1236,6 +1237,95 @@ final class Session {
         }
     }
 
+    // MARK: - Automation
+
+    // Automation belongs to a track, or to the Master row when the ID is Song.masterID.
+
+    func automation(_ owner: UUID) -> Automation {
+        owner == Song.masterID ? song.master.auto : song.tracks.first { $0.id == owner }?.auto ?? Automation()
+    }
+
+    func updateAutomation(_ owner: UUID, undoable: Bool = true, _ change: (inout Automation) -> Void) {
+        if undoable {
+            edit { $0.updateAutomation(owner, change) }
+        } else {
+            song.updateAutomation(owner, change)
+        }
+    }
+
+    /// Point lane `index` at another setting. A setting already on show elsewhere swaps places with it.
+    func setLane(_ owner: UUID, _ index: Int, to target: AutoTarget) {
+        updateAutomation(owner, undoable: false) { a in
+            guard a.lanes.indices.contains(index) else { return }
+            if let other = a.lanes.firstIndex(of: target) { a.lanes[other] = a.lanes[index] }
+            a.lanes[index] = target
+        }
+    }
+
+    /// Show another lane under lane `index`: the next automated setting not on show, or else the next one along.
+    func addLane(_ owner: UUID, after index: Int) {
+        let a = automation(owner)
+        let choices = automationTargets(owner)
+        let target = a.curves.keys.sorted { $0.key < $1.key }.first { !a.lanes.contains($0) }
+            ?? choices.first { !a.lanes.contains($0) }
+        guard let target else { return }
+        updateAutomation(owner, undoable: false) { $0.lanes.insert(target, at: min(index + 1, $0.lanes.count)) }
+    }
+
+    /// Hide a lane. Its curve stays and keeps playing.
+    func removeLane(_ owner: UUID, _ index: Int) {
+        updateAutomation(owner, undoable: false) { a in
+            guard a.lanes.count > 1, a.lanes.indices.contains(index) else { return }
+            a.lanes.remove(at: index)
+        }
+    }
+
+    /// The built-in settings a lane can move, in menu order (plugin parameters come on top of these).
+    func automationTargets(_ owner: UUID) -> [AutoTarget] {
+        if owner == Song.masterID {
+            return [.volume, .limiterOn] + song.buses.flatMap { [AutoTarget.busReturn($0.id), .busMute($0.id)] }
+        }
+        return [.volume, .pan, .mute, .solo, .eqOn, .hpfOn, .lowGain, .midGain, .midFreq, .highGain,
+                .compOn, .compThreshold, .compMakeup] + song.buses.map { .send($0.id) }
+    }
+
+    /// The setting's value without automation: what the mixer shows.
+    func staticValue(_ owner: UUID, _ target: AutoTarget) -> Double {
+        func b(_ v: Bool) -> Double { v ? 1 : 0 }
+        if case .plugin(let slot, let address) = target {
+            return Double(audio.unit(slot)?.auAudioUnit.parameterTree?.parameter(withAddress: address)?.value ?? 0)
+        }
+        if owner == Song.masterID {
+            let m = song.master
+            switch target {
+            case .volume: return m.volumeDB
+            case .limiterOn: return b(m.limiterOn)
+            case .busReturn(let id): return song.buses.first { $0.id == id }?.returnDB ?? 0
+            case .busMute(let id): return b(song.buses.first { $0.id == id }?.mute ?? false)
+            default: return 0
+            }
+        }
+        guard let t = song.tracks.first(where: { $0.id == owner }) else { return 0 }
+        let s = t.strip
+        switch target {
+        case .volume: return s.volumeDB
+        case .pan: return s.pan
+        case .mute: return b(t.mute)
+        case .solo: return b(t.solo)
+        case .eqOn: return b(s.eqOn)
+        case .hpfOn: return b(s.hpfOn)
+        case .lowGain: return s.lowGain
+        case .midGain: return s.midGain
+        case .midFreq: return s.midFreq
+        case .highGain: return s.highGain
+        case .compOn: return b(s.compOn)
+        case .compThreshold: return s.compThreshold
+        case .compMakeup: return s.compMakeup
+        case .send(let id): return s.sends[id] ?? 0
+        default: return 0
+        }
+    }
+
     func toggleArm(_ id: UUID) {
         guard !isRecording else { return }
         updateTrack(id, undoable: false) { $0.armed.toggle() }
@@ -1564,7 +1654,8 @@ final class Session {
             try? FileManager.default.createDirectory(at: stemFolder, withIntermediateDirectories: true)
             for (i, t) in base.tracks.enumerated() where !t.comp.isEmpty && !t.mute {
                 var s = base
-                for j in s.tracks.indices { s.tracks[j].solo = j == i }
+                // Solo automation would pull other tracks into the stem.
+                for j in s.tracks.indices { s.tracks[j].solo = j == i; s.tracks[j].auto.curves[.solo] = nil }
                 let name = ProjectStore.sanitize(String(format: "%02d %@", i + 1, t.name))
                 jobs.append((s, stemFolder.appendingPathComponent(name).appendingPathExtension(format.ext)))
             }

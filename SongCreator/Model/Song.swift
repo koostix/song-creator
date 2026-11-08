@@ -93,18 +93,6 @@ struct CompSegment: Codable, Equatable, Identifiable {
     var length: Double { end - start }
 }
 
-struct AutoPoint: Codable, Equatable, Identifiable {
-    var id = UUID()
-    var time: Double
-    var value: Double
-}
-
-enum AutoParam: String, Codable, CaseIterable, Identifiable {
-    case volume, pan
-    var id: String { rawValue }
-    var label: String { self == .volume ? "Volume" : "Pan" }
-}
-
 /// A MIDI track playing outboard gear: its notes go out to a MIDI device instead of an instrument.
 struct ExternalMIDI: Codable, Equatable {
     var deviceID: Int32
@@ -263,12 +251,7 @@ struct Track: Codable, Identifiable, Equatable {
     var strip = ChannelStrip()
     /// Hear the input through this track's effects (software monitoring).
     var monitor = false
-    var volumeAuto: [AutoPoint] = []
-    var panAuto: [AutoPoint] = []
-    /// Follow the automation curves during playback.
-    var autoRead = true
-    var showAutomation = false
-    var autoParam: AutoParam = .volume
+    var auto = Automation()
     var inserts: [PluginSlot] = []
     /// Audio Unit instrument for MIDI tracks; nil uses the built-in General MIDI sounds.
     var instrument: PluginSlot?
@@ -279,24 +262,9 @@ struct Track: Codable, Identifiable, Equatable {
 
     func take(_ id: UUID) -> Take? { takes.first { $0.id == id } }
 
-    func points(_ p: AutoParam) -> [AutoPoint] { p == .volume ? volumeAuto : panAuto }
-
     /// Where a note that starts at song time `t` actually plays, after this track's quantize.
     func playTime(_ t: Double, secondsPerBeat spb: Double) -> Double {
         quantize?.apply(t, secondsPerBeat: spb) ?? t
-    }
-
-    var hasAutomation: Bool { autoRead && (!volumeAuto.isEmpty || !panAuto.isEmpty) }
-
-    /// Linear interpolation of an automation curve at time t (nil if the curve is empty).
-    static func evaluate(_ points: [AutoPoint], at t: Double) -> Double? {
-        guard let first = points.first else { return nil }
-        if t <= first.time { return first.value }
-        for (a, b) in zip(points, points.dropFirst()) where t < b.time {
-            let f = (t - a.time) / max(1e-9, b.time - a.time)
-            return a.value + (b.value - a.value) * f
-        }
-        return points.last!.value
     }
 
     /// End of the last piece of content on this track.
@@ -332,6 +300,8 @@ struct MasterSettings: Codable, Equatable {
     var limiterOn = true
     /// Plugins on the whole mix, before the master fader and limiter.
     var inserts: [PluginSlot] = []
+    /// The Master row's automation: the master fader and limiter, the buses, and their plugins.
+    var auto = Automation()
 }
 
 /// An effect bus: tracks send to it, it runs its own plugins, and it returns into the mix before the master.
@@ -437,10 +407,8 @@ struct Song: Codable, Equatable {
             t.strip.sends = Dictionary(uniqueKeysWithValues: t.strip.sends.compactMap { k, v in busIDs[k].map { ($0, v) } })
             t.takes = []
             t.comp = []
-            t.volumeAuto = []
-            t.panAuto = []
+            t.auto = Automation()
             t.showTakes = false
-            t.showAutomation = false
             t.mute = false
             t.solo = false
             t.inserts = t.inserts.map { var slot = $0; slot.id = UUID(); return slot }
@@ -448,6 +416,7 @@ struct Song: Codable, Equatable {
             return t
         }
         s.master.inserts = master.inserts.map { var slot = $0; slot.id = UUID(); return slot }
+        s.master.auto = Automation()
         return s
     }
 
@@ -482,6 +451,8 @@ extension CompSegment {
     }
 }
 
+private enum LegacyAutoKeys: String, CodingKey { case volumeAuto, panAuto, autoRead, showAutomation, autoParam }
+
 extension Track {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -501,11 +472,17 @@ extension Track {
         comp = try c.decodeIfPresent([CompSegment].self, forKey: .comp) ?? []
         strip = try c.decodeIfPresent(ChannelStrip.self, forKey: .strip) ?? d.strip
         monitor = try c.decodeIfPresent(Bool.self, forKey: .monitor) ?? d.monitor
-        volumeAuto = try c.decodeIfPresent([AutoPoint].self, forKey: .volumeAuto) ?? []
-        panAuto = try c.decodeIfPresent([AutoPoint].self, forKey: .panAuto) ?? []
-        autoRead = try c.decodeIfPresent(Bool.self, forKey: .autoRead) ?? d.autoRead
-        showAutomation = try c.decodeIfPresent(Bool.self, forKey: .showAutomation) ?? d.showAutomation
-        autoParam = try c.decodeIfPresent(AutoParam.self, forKey: .autoParam) ?? d.autoParam
+        if let a = try c.decodeIfPresent(Automation.self, forKey: .auto) {
+            auto = a
+        } else {
+            // Before every setting could be automated: a volume and a pan curve, one lane at a time.
+            let old = try decoder.container(keyedBy: LegacyAutoKeys.self)
+            auto.set(.volume, try old.decodeIfPresent([AutoPoint].self, forKey: .volumeAuto) ?? [])
+            auto.set(.pan, try old.decodeIfPresent([AutoPoint].self, forKey: .panAuto) ?? [])
+            auto.read = try old.decodeIfPresent(Bool.self, forKey: .autoRead) ?? true
+            auto.show = try old.decodeIfPresent(Bool.self, forKey: .showAutomation) ?? false
+            if try old.decodeIfPresent(String.self, forKey: .autoParam) == "pan" { auto.lanes = [.pan] }
+        }
         inserts = try c.decodeIfPresent([PluginSlot].self, forKey: .inserts) ?? []
         instrument = try c.decodeIfPresent(PluginSlot.self, forKey: .instrument)
         external = try c.decodeIfPresent(ExternalMIDI.self, forKey: .external)
@@ -552,6 +529,7 @@ extension MasterSettings {
         volumeDB = try c.decodeIfPresent(Double.self, forKey: .volumeDB) ?? d.volumeDB
         limiterOn = try c.decodeIfPresent(Bool.self, forKey: .limiterOn) ?? d.limiterOn
         inserts = try c.decodeIfPresent([PluginSlot].self, forKey: .inserts) ?? d.inserts
+        auto = try c.decodeIfPresent(Automation.self, forKey: .auto) ?? d.auto
     }
 }
 

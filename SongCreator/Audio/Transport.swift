@@ -108,7 +108,7 @@ final class Transport {
             t.resume()
             timer = t
 
-            if song.tracks.contains(where: \.hasAutomation) {
+            if song.hasAutomation {
                 let a = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
                 a.schedule(deadline: .now(), repeating: 0.005, leeway: .milliseconds(1))
                 a.setEventHandler { [weak self] in self?.automationTick(anchor: anchor) }

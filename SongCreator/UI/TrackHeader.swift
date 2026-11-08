@@ -67,8 +67,8 @@ struct TrackHeader: View {
                             session.updateTrack(track.id, undoable: false) { $0.monitor.toggle() }
                         }
                     }
-                    LitButton(label: "A", on: track.showAutomation, color: .green, help: "Show volume/pan automation") {
-                        session.updateTrack(track.id, undoable: false) { $0.showAutomation.toggle() }
+                    LitButton(label: "A", on: track.auto.show, color: .green, help: "Show automation: any of this track's settings, sends and plugin parameters") {
+                        session.updateTrack(track.id, undoable: false) { $0.auto.show.toggle() }
                     }
                     Group {
                         if track.kind == .audio { inputMenu } else { instrumentMenu }

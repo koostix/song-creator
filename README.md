@@ -25,7 +25,8 @@ A native macOS multitrack recorder for getting a song down in one sitting: recor
   tempo-synced Delay bus, and you can add as many as you like (older songs keep their reverb and delay as buses)
 - Audio Unit effects on the master too, before the master fader and limiter
 - A resizable mixer (drag its top edge, or ⇧X to fill the window) that shows more effects as it grows
-- Volume automation lanes and a master limiter
+- Automation for any setting: volume, pan, mute, solo, EQ, compressor, sends and plugin parameters on each track, plus a Master row for the master fader, limiter, bus returns and their plugins
+- A master limiter
 - Offline mixdown to WAV (16 or 24 bit) or AAC, named with the date and time
 
 **Song management**
