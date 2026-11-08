@@ -663,21 +663,27 @@ final class Session {
         saveTimelineView()
         saveWork?.cancel()
         if capturePlugins {
-            for t in song.tracks {
-                for slot in t.inserts + (t.instrument.map { [$0] } ?? []) {
-                    if let data = audio.pluginState(slot.id) { pluginStates[slot.id] = data }
-                }
+            let slots = song.tracks.flatMap { $0.inserts + ($0.instrument.map { [$0] } ?? []) } + song.master.inserts
+            for slot in slots {
+                if let data = audio.pluginState(slot.id) { pluginStates[slot.id] = data }
             }
             lastPluginCapture = Date()
         }
-        var copy = song
+        do { try ProjectStore.save(withPluginStates(song), to: projectURL) } catch { message = "Save failed: \(error.localizedDescription)" }
+    }
+
+    /// `s` with each plugin's last captured settings, for saving.
+    private func withPluginStates(_ s: Song) -> Song {
+        var copy = s
+        func apply(_ slots: inout [PluginSlot]) {
+            for j in slots.indices { if let d = pluginStates[slots[j].id] { slots[j].state = d } }
+        }
         for i in copy.tracks.indices {
-            for j in copy.tracks[i].inserts.indices {
-                if let d = pluginStates[copy.tracks[i].inserts[j].id] { copy.tracks[i].inserts[j].state = d }
-            }
+            apply(&copy.tracks[i].inserts)
             if let id = copy.tracks[i].instrument?.id, let d = pluginStates[id] { copy.tracks[i].instrument?.state = d }
         }
-        do { try ProjectStore.save(copy, to: projectURL) } catch { message = "Save failed: \(error.localizedDescription)" }
+        apply(&copy.master.inserts)
+        return copy
     }
 
     // MARK: - New-song default
@@ -685,13 +691,7 @@ final class Session {
     /// Save this song's setup (with plugins' current settings) as the start for new songs.
     func saveAsNewSongDefault() {
         saveNow()   // captures plugin states
-        var copy = song
-        for i in copy.tracks.indices {
-            for j in copy.tracks[i].inserts.indices {
-                if let d = pluginStates[copy.tracks[i].inserts[j].id] { copy.tracks[i].inserts[j].state = d }
-            }
-            if let id = copy.tracks[i].instrument?.id, let d = pluginStates[id] { copy.tracks[i].instrument?.state = d }
-        }
+        let copy = withPluginStates(song)
         do {
             try ProjectStore.saveTemplate(copy)
             message = "Saved as the default for new songs: \(copy.tracks.count) track\(copy.tracks.count == 1 ? "" : "s"), with their instruments, plugins and settings."
@@ -702,31 +702,49 @@ final class Session {
 
     // MARK: - Plugins
 
-    func addInsert(_ info: PluginInfo, to track: UUID) {
-        updateTrack(track) { $0.inserts.append(info.makeSlot()) }
+    // Effect chains belong to a track, or to the master when the ID is Song.masterID.
+
+    func inserts(of owner: UUID) -> [PluginSlot] {
+        owner == Song.masterID ? song.master.inserts : (song.tracks.first { $0.id == owner }?.inserts ?? [])
     }
 
-    func removeInsert(_ slot: UUID, from track: UUID) {
+    func chainName(_ owner: UUID) -> String {
+        owner == Song.masterID ? "Master" : (song.tracks.first { $0.id == owner }?.name ?? "")
+    }
+
+    private func updateInserts(_ owner: UUID, undoable: Bool = true, _ change: (inout [PluginSlot]) -> Void) {
+        if owner == Song.masterID {
+            if undoable { edit { change(&$0.master.inserts) } } else { change(&song.master.inserts) }
+        } else {
+            updateTrack(owner, undoable: undoable) { change(&$0.inserts) }
+        }
+    }
+
+    func addInsert(_ info: PluginInfo, to owner: UUID) {
+        updateInserts(owner) { $0.append(info.makeSlot()) }
+    }
+
+    func removeInsert(_ slot: UUID, from owner: UUID) {
         PluginWindows.close(slot)
-        updateTrack(track) { $0.inserts.removeAll { $0.id == slot } }
+        updateInserts(owner) { $0.removeAll { $0.id == slot } }
     }
 
-    func moveInsert(_ slot: UUID, in track: UUID, by delta: Int) {
-        updateTrack(track) { t in
-            guard let i = t.inserts.firstIndex(where: { $0.id == slot }) else { return }
-            let j = max(0, min(t.inserts.count - 1, i + delta))
-            t.inserts.insert(t.inserts.remove(at: i), at: j)
+    func moveInsert(_ slot: UUID, in owner: UUID, by delta: Int) {
+        updateInserts(owner) { list in
+            guard let i = list.firstIndex(where: { $0.id == slot }) else { return }
+            let j = max(0, min(list.count - 1, i + delta))
+            list.insert(list.remove(at: i), at: j)
         }
     }
 
     /// Reorder the effect chain (from a drag in the FX panel); the audio is rewired to match.
-    func moveInserts(in track: UUID, from: IndexSet, to: Int) {
-        updateTrack(track) { $0.inserts.move(fromOffsets: from, toOffset: to) }
+    func moveInserts(in owner: UUID, from: IndexSet, to: Int) {
+        updateInserts(owner) { $0.move(fromOffsets: from, toOffset: to) }
     }
 
-    func toggleBypass(_ slot: UUID, in track: UUID) {
-        updateTrack(track, undoable: false) { t in
-            if let i = t.inserts.firstIndex(where: { $0.id == slot }) { t.inserts[i].bypass.toggle() }
+    func toggleBypass(_ slot: UUID, in owner: UUID) {
+        updateInserts(owner, undoable: false) { list in
+            if let i = list.firstIndex(where: { $0.id == slot }) { list[i].bypass.toggle() }
         }
     }
 
@@ -738,15 +756,18 @@ final class Session {
         }
     }
 
-    func openEditor(_ slot: PluginSlot, track: Track) {
+    func openEditor(_ slot: PluginSlot, track: Track) { openEditor(slot, owner: track.id) }
+
+    /// Open a plugin's own window. `owner` is its track, or Song.masterID.
+    func openEditor(_ slot: PluginSlot, owner: UUID) {
         guard let unit = audio.unit(slot.id) else {
             message = audio.pluginErrors[slot.id] ?? "\(slot.name) is still loading."
             return
         }
         // Effects get an on/off button in the window's title bar, to compare with and without them.
-        let isEffect = track.inserts.contains { $0.id == slot.id }
-        let power = isEffect ? NSHostingView(rootView: PluginPowerButton(session: self, trackID: track.id, slotID: slot.id)) : nil
-        PluginWindows.open(unit, slot: slot.id, title: "\(slot.name) — \(track.name)", accessory: power)
+        let isEffect = inserts(of: owner).contains { $0.id == slot.id }
+        let power = isEffect ? NSHostingView(rootView: PluginPowerButton(session: self, ownerID: owner, slotID: slot.id)) : nil
+        PluginWindows.open(unit, slot: slot.id, title: "\(slot.name) — \(chainName(owner))", accessory: power)
     }
 
     func pluginStatus(_ slot: PluginSlot) -> String? {

@@ -354,6 +354,80 @@ enum PluginTest {
             session.undo()
             spin(15) { session.audio.unit(slot.id) != nil }
             check(session.song.tracks[0].inserts.count == 1 && session.audio.unit(slot.id) != nil, "undo brings it back")
+
+            // The same plugin on the master, before the master fader and limiter.
+            session.addInsert(fx, to: Song.masterID)
+            let mslot = session.song.master.inserts[0]
+            spin(15) { session.audio.unit(mslot.id) != nil || session.audio.pluginErrors[mslot.id] != nil }
+            check(session.audio.masterInserts == [mslot.id], "\(fx.name): loads on the master")
+            session.toggleBypass(mslot.id, in: Song.masterID)
+            check(session.audio.unit(mslot.id)?.auAudioUnit.shouldBypassEffect == true, "\(fx.name): ⏻ bypasses it on the master")
+            session.toggleBypass(mslot.id, in: Song.masterID)
+            session.openEditor(mslot, owner: Song.masterID)
+            spin(10) { PluginWindows.isOpen(mslot.id) }
+            check(PluginWindows.isOpen(mslot.id) && PluginWindows.hasAccessory(mslot.id), "\(fx.name): the master's editor has its on/off button")
+            session.removeInsert(mslot.id, from: Song.masterID)
+            spin(0.5)
+            check(session.song.master.inserts.isEmpty && session.audio.masterInserts.isEmpty && !PluginWindows.isOpen(mslot.id),
+                  "\(fx.name): × removes it from the master")
+
+            // Effects added, moved and removed while the song plays. The engine resets a player whose path to
+            // the output is cut, so the track used to fall silent until playback was restarted. The master is
+            // turned right down: nothing is heard, and the level is read before the effects.
+            while !session.song.tracks[0].inserts.isEmpty { session.removeInsert(session.song.tracks[0].inserts[0].id, from: tid) }
+            let channels = session.song.tracks[0].channels
+            let toneName = "plugintest-tone.caf"
+            if let f = try? Recorder.makeFile(url: session.audioFolder.appendingPathComponent(toneName),
+                                              sampleRate: session.audio.sampleRate, channels: channels) {
+                let n = AVAudioFrameCount(session.audio.sampleRate * 30)
+                let buf = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: n)!
+                buf.frameLength = n
+                for c in 0..<channels {
+                    for i in 0..<Int(n) { buf.floatChannelData![c][i] = Float(0.5 * sin(2 * .pi * 220 * Double(i) / session.audio.sampleRate)) }
+                }
+                try? f.write(from: buf)
+            }
+            session.edit { s in
+                s.master.volumeDB = -60
+                let take = Take(name: "tone", fileName: toneName, start: 0, duration: 30)
+                s.tracks[0].takes = [take]
+                s.tracks[0].assign(takeID: take.id, over: take.range)
+            }
+            let lock = NSLock()
+            var peak: Float = 0
+            let tapped = session.audio.tracks[tid]?.eq
+            tapped?.installTap(onBus: 0, bufferSize: 2048, format: nil) { buf, _ in
+                let p = MeterStore.peak(buf)
+                lock.lock(); peak = max(peak, p); lock.unlock()
+            }
+            func playing(_ what: String) {
+                lock.lock(); peak = 0; lock.unlock()
+                spin(0.6)
+                lock.lock(); let p = peak; lock.unlock()
+                check(p > 0.05, String(format: "the track keeps playing after %@ (level %.2f)", what, p))
+            }
+            func added(_ owner: UUID) {
+                let slots = owner == Song.masterID ? session.song.master.inserts : session.song.tracks[0].inserts
+                spin(15) { slots.allSatisfy { session.audio.unit($0.id) != nil || session.audio.pluginErrors[$0.id] != nil } }
+            }
+            let fx2 = effects.dropFirst().first ?? fx
+            session.play(from: 0)
+            spin(1)
+            playing("starting")
+            session.addInsert(fx, to: tid); added(tid)
+            playing("adding \(fx.name)")
+            session.addInsert(fx2, to: tid); added(tid)
+            playing("adding \(fx2.name) after it")
+            session.moveInsert(session.song.tracks[0].inserts[0].id, in: tid, by: 1)
+            playing("swapping them")
+            session.removeInsert(session.song.tracks[0].inserts[0].id, from: tid)
+            playing("removing one")
+            session.addInsert(fx, to: Song.masterID); added(Song.masterID)
+            playing("adding \(fx.name) on the master")
+            session.removeInsert(session.song.master.inserts[0].id, from: Song.masterID)
+            playing("removing it from the master")
+            session.stop()
+            tapped?.removeTap(onBus: 0)
             session.close()
             try? FileManager.default.removeItem(at: root)
         }

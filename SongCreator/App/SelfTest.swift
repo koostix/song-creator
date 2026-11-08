@@ -30,6 +30,8 @@ enum SelfTest {
             synth.external = ExternalMIDI(deviceID: 999, deviceName: "Volt 1 USB Audio Interface", channel: 10)
             synth.takes = [Take(name: "t", start: 0, duration: 2, notes: []), Take(name: "t2", start: 0, duration: 2, notes: [])]
             song.tracks.append(synth)
+            song.master.inserts = [PluginSlot(name: "AUDynamicsProcessor", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                              subType: kAudioUnitSubType_DynamicsProcessor, manufacturerCode: kAudioUnitManufacturer_Apple)]
             song.loop = TimeRange(start: 0, end: 8)
             let model = AppModel()
             let session = Session(projectURL: project, song: song)
@@ -233,6 +235,47 @@ enum SelfTest {
         try f.read(into: buf)
         return Mix(data: Array(UnsafeBufferPointer(start: buf.floatChannelData![0], count: Int(buf.frameLength))),
                    sr: f.processingFormat.sampleRate)
+    }
+
+    /// Render `song` like a mixdown, applying `changes` at their times as if edited during playback: plugins
+    /// load asynchronously and the chain is re-synced once they're ready, as in the app.
+    static func renderChanging(_ song: Song, changes: [(Double, (inout Song) -> Void)], audio: AudioEngine,
+                               dir: URL, length: Double) throws -> Mix {
+        let engine = audio.engine
+        let sr = audio.sampleRate
+        var song = song
+        try audio.enableOfflineRendering()
+        defer {
+            engine.stop()
+            engine.disableManualRenderingMode()
+        }
+        audio.sync(song)
+        try engine.start()
+        let transport = Transport(audio: audio, audioFolder: dir.appendingPathComponent("Audio"), song: song)
+        transport.prepare(PlayRequest(song: song, position: 0, includeClick: false))
+        transport.setMIDIBase(engine.manualRenderingSampleTime)
+        for n in audio.tracks.values { n.player?.play() }
+        let buffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat, frameCapacity: 512)!
+        var data: [Float] = []
+        var pending = changes.sorted { $0.0 < $1.0 }
+        while data.count < Int(length * sr) {
+            if let next = pending.first, Double(data.count) / sr >= next.0 {
+                pending.removeFirst()
+                next.1(&song)
+                audio.sync(song)
+                waitForPlugins(audio, song.tracks.flatMap(\.inserts) + song.master.inserts)
+                audio.sync(song)
+            }
+            transport.fill(throughPlayerFrame: Int64(data.count) + 16384)
+            guard try engine.renderOffline(512, to: buffer) == .success else { throw Failure(description: "render failed") }
+            data += UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength))
+        }
+        return Mix(data: data, sr: sr)
+    }
+
+    /// What feeds `mixer`, on whichever input bus.
+    static func feeder(_ audio: AudioEngine, _ mixer: AVAudioMixerNode) -> AVAudioNode? {
+        (0..<16).lazy.compactMap { audio.engine.inputConnectionPoint(for: mixer, inputBus: $0)?.node }.first
     }
 
     /// Let async plugin loading (which completes on the main queue) finish.
@@ -574,6 +617,84 @@ enum SelfTest {
         try check(lp440 > 0.005 && lp880 < lp440 * 0.6, "insert plugin processes the audio")
         try check(mix.window(6.1, 6.8).rms > 0.002, "MIDI plays through the AU instrument")
         try check(audio.pluginState(lowpass.id) != nil, "plugin state can be saved")
+
+        // Master plugins: the whole mix → the master's plugins → master fader → limiter.
+        var mastered = song
+        mastered.tracks[0].inserts[0].bypass = true   // (kept loaded: the rebuild test below reuses its settings)
+        let masterLP = PluginSlot(name: "AULowpass", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                  subType: kAudioUnitSubType_LowPassFilter, manufacturerCode: kAudioUnitManufacturer_Apple)
+        let masterHP = PluginSlot(name: "AUHipass", manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                  subType: kAudioUnitSubType_HighPassFilter, manufacturerCode: kAudioUnitManufacturer_Apple)
+        mastered.master.inserts = [masterLP, masterHP]
+        audio.sync(mastered)
+        waitForPlugins(audio, [masterLP, masterHP])
+        audio.sync(mastered)
+        try check(audio.masterInserts == [masterLP.id, masterHP.id], "master plugins are wired in order")
+        try check(audio.engine.inputConnectionPoint(for: audio.unit(masterLP.id)!, inputBus: 0)?.node === audio.masterIn
+                  && audio.engine.inputConnectionPoint(for: audio.masterIn, inputBus: 0)?.node === audio.masterMixer
+                  && feeder(audio, audio.masterFader) === audio.unit(masterHP.id),
+                  "master plugins sit between the mix and the master fader")
+        mastered.master.inserts.move(fromOffsets: [1], toOffset: 0)
+        audio.sync(mastered)
+        try check(audio.masterInserts == [masterHP.id, masterLP.id], "reordering the master's plugins rewires them")
+        mastered.master.inserts = [masterLP]
+        audio.sync(mastered)
+        try check(audio.masterInserts == [masterLP.id] && audio.unit(masterHP.id) == nil, "removing a master plugin releases it")
+        AudioUnitSetParameter(audio.unit(masterLP.id)!.audioUnit, kLowPassParam_CutoffFrequency, kAudioUnitScope_Global, 0, 200, 0)
+        mix = try render(mastered, audio: audio, dir: dir, length: 9, name: "master-plugin.wav")
+        let m440 = mix.window(1.5, 2.5).rms, m880 = mix.window(3.2, 3.8).rms
+        print(String(format: "  master low-passed: 440 Hz %.4f, 880 Hz %.4f", m440, m880))
+        try check(m440 > 0.005 && m880 < m440 * 0.6, "a master plugin processes the whole mix, in mixdowns too")
+        mastered.master.inserts[0].bypass = true
+        mix = try render(mastered, audio: audio, dir: dir, length: 9, name: "master-plugin-off.wav")
+        try check(mix.window(3.2, 3.8).rms > m880 * 2, "switching a master plugin off lets the mix through unchanged")
+        let reloaded = try JSONDecoder().decode(Song.self, from: JSONEncoder().encode(mastered))
+        try check(reloaded.master.inserts == mastered.master.inserts, "master plugins are saved with the song")
+        let oldMaster = try JSONDecoder().decode(MasterSettings.self, from: Data(#"{"volumeDB": -2}"#.utf8))
+        try check(oldMaster.inserts.isEmpty && oldMaster.volumeDB == -2, "songs from before master plugins still open")
+        let template = mastered.asTemplate()
+        try check(template.master.inserts.count == 1 && template.master.inserts[0].id != masterLP.id,
+                  "a new-song default copies the master's plugins with new IDs")
+        mastered.master.inserts = []
+        audio.sync(mastered)
+        try check(audio.masterInserts.isEmpty && feeder(audio, audio.masterFader) === audio.masterIn,
+                  "with no master plugins the mix goes straight to the fader")
+
+        // Effects added, reordered and removed while the song plays. The engine resets a player whose path to
+        // the output is cut, even for a moment, so the track used to fall silent until playback restarted.
+        print("Effects changed during playback")
+        var live = song
+        live.tracks = [track]   // plays 1–5 s
+        live.master.inserts = []
+        func liveSlot(_ subType: OSType, _ name: String) -> PluginSlot {
+            var slot = PluginSlot(name: name, manufacturer: "Apple", type: kAudioUnitType_Effect,
+                                  subType: subType, manufacturerCode: kAudioUnitManufacturer_Apple)
+            slot.bypass = true   // so the level shows whether the track still plays
+            return slot
+        }
+        let liveA = liveSlot(kAudioUnitSubType_LowPassFilter, "AULowpass")
+        let liveB = liveSlot(kAudioUnitSubType_HighPassFilter, "AUHipass")
+        let liveM = liveSlot(kAudioUnitSubType_LowPassFilter, "AULowpass")
+        let changes: [(Double, String, (inout Song) -> Void)] = [
+            (1.4, "adding an effect", { $0.tracks[0].inserts = [liveA] }),
+            (1.8, "adding a second", { $0.tracks[0].inserts = [liveA, liveB] }),
+            (2.2, "reordering them", { $0.tracks[0].inserts = [liveB, liveA] }),
+            (2.6, "removing the first", { $0.tracks[0].inserts = [liveA] }),
+            (3.0, "adding one in front", { $0.tracks[0].inserts = [liveB, liveA] }),
+            (3.4, "removing them all", { $0.tracks[0].inserts = [] }),
+            (3.8, "adding a master effect", { $0.master.inserts = [liveM] }),
+            (4.2, "removing the master effect", { $0.master.inserts = [] }),
+        ]
+        mix = try renderChanging(live, changes: changes.map { ($0.0, $0.2) }, audio: audio, dir: dir, length: 5)
+        for (t, what, _) in changes {
+            let level = mix.window(t + 0.1, t + 0.4).rms
+            try check(level > 0.1, String(format: "the track keeps playing after %@ (level %.3f)", what, level))
+        }
+        // The track's low-pass was released above; reload it with the settings the rebuild test expects.
+        audio.sync(song)
+        waitForPlugins(audio, [lowpass])
+        audio.sync(song)
+        AudioUnitSetParameter(audio.unit(lowpass.id)!.audioUnit, kLowPassParam_CutoffFrequency, kAudioUnitScope_Global, 0, 200, 0)
         // Editor windows need a fully launched app (out-of-process plugin views are remote views), so they're
         // covered by the in-app `--plugintest`, not here.
 

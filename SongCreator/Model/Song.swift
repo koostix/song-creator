@@ -313,9 +313,14 @@ struct MasterSettings: Codable, Equatable {
     var delayDivision: DelayDivision = .dottedEighth
     var delayFeedback: Double = 30
     var delayReturnDB: Double = 0
+    /// Plugins on the whole mix, before the master fader and limiter.
+    var inserts: [PluginSlot] = []
 }
 
 struct Song: Codable, Equatable {
+    /// Stands for the master in calls that take a track ID, like adding or moving a plugin.
+    static let masterID = UUID(uuidString: "4D415354-4552-4D41-5354-45524D415354")!
+
     var id = UUID()
     var name: String
     var tempo: Double = 120
@@ -386,6 +391,7 @@ struct Song: Codable, Equatable {
             if var inst = t.instrument { inst.id = UUID(); t.instrument = inst }
             return t
         }
+        s.master.inserts = master.inserts.map { var slot = $0; slot.id = UUID(); return slot }
         return s
     }
 
@@ -494,6 +500,7 @@ extension MasterSettings {
         delayDivision = (try? c.decodeIfPresent(DelayDivision.self, forKey: .delayDivision)) ?? d.delayDivision
         delayFeedback = try c.decodeIfPresent(Double.self, forKey: .delayFeedback) ?? d.delayFeedback
         delayReturnDB = try c.decodeIfPresent(Double.self, forKey: .delayReturnDB) ?? d.delayReturnDB
+        inserts = try c.decodeIfPresent([PluginSlot].self, forKey: .inserts) ?? d.inserts
     }
 }
 

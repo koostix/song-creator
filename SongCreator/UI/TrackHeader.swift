@@ -423,12 +423,13 @@ struct FXChainPanel: View {
 /// On/off for one effect, shown in its editor window's title bar.
 struct PluginPowerButton: View {
     @Bindable var session: Session
-    let trackID: UUID
+    /// The slot's track, or Song.masterID.
+    let ownerID: UUID
     let slotID: UUID
 
     var body: some View {
-        let on = !(session.song.tracks.first { $0.id == trackID }?.inserts.first { $0.id == slotID }?.bypass ?? false)
-        Button { session.toggleBypass(slotID, in: trackID) } label: {
+        let on = !(session.inserts(of: ownerID).first { $0.id == slotID }?.bypass ?? false)
+        Button { session.toggleBypass(slotID, in: ownerID) } label: {
             HStack(spacing: 4) {
                 Image(systemName: "power").font(.system(size: 10, weight: .bold))
                 Text(on ? "On" : "Off").font(.system(size: 11, weight: .semibold))

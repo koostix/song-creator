@@ -47,6 +47,9 @@ final class TrackNodes {
     let preMix = AVAudioMixerNode()
     let eq = AVAudioUnitEQ(numberOfBands: 4)
     let comp = AVAudioUnitEffect(audioComponentDescription: AudioEngine.dynamicsDesc)
+    /// Head of the insert chain. The compressor feeds it and never changes, so wiring plugins in and out
+    /// never touches the player's own path (see AudioEngine.wireChain).
+    let insertIn = AVAudioMixerNode()
     let strip = AVAudioMixerNode()
     var monitorNode: AVAudioSourceNode?
     enum MonitorMode { case none, input, monoReturn, stereoReturn }
@@ -59,7 +62,7 @@ final class TrackNodes {
         return track.channels == 1 ? .monoReturn : .stereoReturn
     }
     var monitorReader: MonitorReader?
-    /// Insert slots currently wired between the compressor and the strip.
+    /// Insert slots currently wired between insertIn and the strip.
     var inserts: [UUID] = []
     /// Format of buffers scheduled on the player.
     let format: AVAudioFormat
@@ -113,7 +116,19 @@ final class AudioEngine {
     private var lockedTracks: [UUID: TrackNodes] = [:]
 
     // Created fresh with each engine: audio units carry render state that doesn't move between engines.
+    /// The master chain: every track and return sums here → the master's plugins → masterFader → limiter.
     private(set) var masterMixer = AVAudioMixerNode()
+    /// The master volume, after the master's plugins so they see the same mix however the fader is set.
+    private(set) var masterFader = AVAudioMixerNode()
+    /// Head of the master's plugin chain (masterMixer feeds it; see wireChain).
+    private(set) var masterIn = AVAudioMixerNode()
+    /// The master's plugins, wired in this order between masterIn and masterFader.
+    private(set) var masterInserts: [UUID] = []
+    /// A muted mixer into the output. Every chain's source also feeds it, so the source always has a path to
+    /// the output while plugins are wired in or out. When that path is cut, even for a moment, the engine
+    /// resets everything upstream: a playing track's player throws away its queued audio and stays silent
+    /// until playback is restarted.
+    private(set) var keepAlive = AVAudioMixerNode()
     private(set) var limiter = AVAudioUnitEffect(audioComponentDescription: AudioEngine.limiterDesc)
     private(set) var reverbBus = AVAudioMixerNode()
     private(set) var reverb = AVAudioUnitReverb()
@@ -198,6 +213,10 @@ final class AudioEngine {
         pluginErrors = [:]
         engine = AVAudioEngine()
         masterMixer = AVAudioMixerNode()
+        masterFader = AVAudioMixerNode()
+        masterIn = AVAudioMixerNode()
+        keepAlive = AVAudioMixerNode()
+        masterInserts = []
         limiter = AVAudioUnitEffect(audioComponentDescription: AudioEngine.limiterDesc)
         reverbBus = AVAudioMixerNode()
         reverb = AVAudioUnitReverb()
@@ -314,10 +333,16 @@ final class AudioEngine {
             }
         }
 
-        for node in [masterMixer, limiter, reverbBus, reverb, delayBus, delay, clickPlayer] as [AVAudioNode] {
+        for node in [masterMixer, masterIn, masterFader, limiter, reverbBus, reverb, delayBus, delay, clickPlayer,
+                     keepAlive] as [AVAudioNode] {
             engine.attach(node)
         }
-        engine.connect(masterMixer, to: limiter, format: stereo)
+        engine.connect(keepAlive, to: engine.mainMixerNode, fromBus: 0,
+                       toBus: engine.mainMixerNode.nextAvailableInputBus, format: stereo)
+        keepAlive.outputVolume = 0
+        feedChain(from: masterMixer, to: masterIn)
+        engine.connect(masterIn, to: masterFader, format: stereo)
+        engine.connect(masterFader, to: limiter, format: stereo)
         engine.connect(limiter, to: engine.mainMixerNode, format: stereo)
         engine.connect(reverbBus, to: reverb, format: stereo)
         engine.connect(reverb, to: masterMixer, format: stereo)
@@ -479,17 +504,6 @@ final class AudioEngine {
 
     /// Create/remove/rewire track nodes so they match the song, then push all parameters.
     func sync(_ song: Song) {
-        // Plugins no longer referenced anywhere are released.
-        let liveSlots = Set(song.tracks.flatMap { $0.inserts.map(\.id) + ($0.instrument.map { [$0.id] } ?? []) })
-        for (id, unit) in units where !liveSlots.contains(id) {
-            if unit.engine != nil {
-                engine.disconnectNodeOutput(unit)
-                engine.detach(unit)
-            }
-            units[id] = nil
-            PluginWindows.close(id)
-        }
-
         let ids = Set(song.tracks.map(\.id))
         for (id, nodes) in tracks where !ids.contains(id) { removeNodes(nodes) }
         for track in song.tracks {
@@ -511,6 +525,20 @@ final class AudioEngine {
             let n = addNodes(for: track, instrument: plugin)
             wireInserts(n, track)
         }
+        masterInserts = wireChain(song.master.inserts, current: masterInserts, from: masterIn, to: masterFader)
+
+        // Plugins no longer referenced anywhere are released (after rewiring, which has already taken removed
+        // effects out of their chains without breaking them).
+        let liveSlots = Set(song.tracks.flatMap { $0.inserts.map(\.id) + ($0.instrument.map { [$0.id] } ?? []) }
+                            + song.master.inserts.map(\.id))
+        for (id, unit) in units where !liveSlots.contains(id) {
+            if unit.engine != nil {
+                engine.disconnectNodeOutput(unit)
+                engine.detach(unit)
+            }
+            units[id] = nil
+            PluginWindows.close(id)
+        }
         applyParameters(song)
     }
 
@@ -518,11 +546,12 @@ final class AudioEngine {
     private func addNodes(for track: Track, instrument: (UUID, AVAudioUnitMIDIInstrument)?) -> TrackNodes {
         let n = TrackNodes(track: track, sampleRate: sampleRate, instrument: instrument)
         if n.source.engine != nil { n.source.engine?.detach(n.source) }
-        for node in [n.source, n.preMix, n.eq, n.comp, n.strip] { engine.attach(node) }
+        for node in [n.source, n.preMix, n.eq, n.comp, n.insertIn, n.strip] { engine.attach(node) }
         engine.connect(n.source, to: n.preMix, fromBus: 0, toBus: 0, format: n.kind == .midi ? stereo : n.format)
         engine.connect(n.preMix, to: n.eq, format: stereo)
         engine.connect(n.eq, to: n.comp, format: stereo)
-        engine.connect(n.comp, to: n.strip, fromBus: 0, toBus: 0, format: stereo)
+        feedChain(from: n.comp, to: n.insertIn)
+        engine.connect(n.insertIn, to: n.strip, fromBus: 0, toBus: 0, format: stereo)
         n.masterBus = masterMixer.nextAvailableInputBus
         n.reverbBus = reverbBus.nextAvailableInputBus
         n.delayBus = delayBus.nextAvailableInputBus
@@ -578,7 +607,7 @@ final class AudioEngine {
             engine.disconnectNodeOutput(unit)
             engine.detach(unit)
         }
-        var nodes: [AVAudioNode] = [n.source, n.preMix, n.eq, n.comp, n.strip]
+        var nodes: [AVAudioNode] = [n.source, n.preMix, n.eq, n.comp, n.insertIn, n.strip]
         if let m = n.monitorNode { nodes.append(m) }
         for node in nodes where node.engine != nil {
             engine.disconnectNodeOutput(node)
@@ -587,10 +616,30 @@ final class AudioEngine {
         tracks[n.id] = nil
     }
 
-    /// Put the track's loaded, stereo-capable insert plugins between the compressor and the strip.
+    /// Put the track's loaded, stereo-capable insert plugins between insertIn and the strip.
     private func wireInserts(_ n: TrackNodes, _ track: Track) {
+        n.inserts = wireChain(track.inserts, current: n.inserts, from: n.insertIn, to: n.strip)
+    }
+
+    /// Connect a chain's source to its head mixer, and also to the muted keepAlive mixer, for good. Done once,
+    /// when the nodes are built; from then on only the links after the head mixer change.
+    private func feedChain(from source: AVAudioNode, to head: AVAudioMixerNode) {
+        engine.connect(source, to: [AVAudioConnectionPoint(node: head, bus: 0),
+                                    AVAudioConnectionPoint(node: keepAlive, bus: keepAlive.nextAvailableInputBus)],
+                       fromBus: 0, format: stereo)
+    }
+
+    /// Wire the loaded plugins of `slots`, in order, from `head` to `destination`. `current` is what's wired
+    /// now; returns what's wired after. Untouched when nothing changed.
+    ///
+    /// This runs while the song plays (a plugin finishing loading, an effect added, removed or dragged), so it
+    /// changes only the links that differ and builds new ones before letting go of old ones. Two engine rules
+    /// make that matter: cutting a player's path to the output resets the player for good (keepAlive covers
+    /// that), and links left in place keep their plugins running without a re-initialise.
+    private func wireChain(_ slots: [PluginSlot], current: [UUID], from head: AVAudioMixerNode,
+                           to destination: AVAudioMixerNode) -> [UUID] {
         var wanted: [UUID] = []
-        for slot in track.inserts {
+        for slot in slots {
             load(slot)
             if let unit = units[slot.id], pluginErrors[slot.id] == nil {
                 // Only on a real change: this runs on every mixer move, and many plugins (compressors,
@@ -602,25 +651,39 @@ final class AudioEngine {
                 wanted.append(slot.id)
             }
         }
-        guard wanted != n.inserts else { return }
+        guard wanted != current else { return current }
 
-        engine.disconnectNodeOutput(n.comp)
-        for id in n.inserts {
-            guard let unit = units[id], unit.engine != nil else { continue }
+        let old = current.compactMap { units[$0] }.filter { $0.engine === engine }
+        let new = wanted.compactMap { units[$0] }
+        /// What `unit` feeds in `chain`: the next plugin, or the destination after the last; nil if it isn't in it.
+        func output(of unit: AVAudioUnit, in chain: [AVAudioUnit]) -> AVAudioNode? {
+            guard let i = chain.firstIndex(where: { $0 === unit }) else { return nil }
+            return i + 1 < chain.count ? chain[i + 1] : destination
+        }
+        func connect(_ from: AVAudioNode, to node: AVAudioNode) {
+            // A fresh mixer input each time, so the new link never lands on one still in use.
+            engine.connect(from, to: node, fromBus: 0, toBus: node === destination ? destination.nextAvailableInputBus : 0,
+                           format: stereo)
+        }
+
+        // 1. Unhook the plugin outputs that change. Unchanged links stay.
+        for unit in old where output(of: unit, in: new) !== output(of: unit, in: old) {
             engine.disconnectNodeOutput(unit)
-            if !wanted.contains(id) { engine.detach(unit) }
         }
-        var last: AVAudioNode = n.comp
-        var wired: [UUID] = []
-        for id in wanted {
-            guard let unit = units[id] else { continue }
-            if unit.engine == nil { engine.attach(unit) }
-            engine.connect(last, to: unit, format: stereo)
-            last = unit
-            wired.append(id)
+        for unit in new where unit.engine == nil { engine.attach(unit) }
+        let oldFirst: AVAudioNode = old.first ?? destination
+        let newFirst: AVAudioNode = new.first ?? destination
+        // 2. A plugin moving off the front needs its input freed before something else connects into it.
+        let frontFirst = new.dropFirst().contains { $0 === oldFirst }
+        if frontFirst { connect(head, to: newFirst) }
+        // 3. The new links, built while the old chain still plays.
+        for unit in new where output(of: unit, in: old) !== output(of: unit, in: new) {
+            connect(unit, to: output(of: unit, in: new)!)
         }
-        engine.connect(last, to: n.strip, fromBus: 0, toBus: 0, format: stereo)
-        n.inserts = wired
+        // 4. Point the head at the new chain in one step.
+        if !frontFirst && newFirst !== oldFirst { connect(head, to: newFirst) }
+        for unit in old where !new.contains(where: { $0 === unit }) { engine.detach(unit) }
+        return wanted
     }
 
     // MARK: - Plugins
@@ -656,6 +719,10 @@ final class AudioEngine {
                         self.onPluginsChanged?()
                         return
                     }
+                    // Get the plugin ready to render now, not when it's connected: the engine holds up the
+                    // audio while it connects a plugin that isn't ready, a gap of 100 ms or more mid-song.
+                    unit.auAudioUnit.maximumFramesToRender = AudioEngine.maxRenderFrames
+                    try? unit.auAudioUnit.allocateRenderResources()
                 }
                 self.units[slot.id] = unit
                 self.onPluginsChanged?()
@@ -685,6 +752,9 @@ final class AudioEngine {
         guard let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)) else { return nil }
         return AVAudioFormat(standardFormatWithSampleRate: rate, channelLayout: layout)
     }
+
+    /// The largest render the engine asks for (realtime and offline).
+    static let maxRenderFrames: AUAudioFrameCount = 4096
 
     static func gain(_ db: Double) -> Float { db <= -60 ? 0 : Float(pow(10, db / 20)) }
 
@@ -750,7 +820,7 @@ final class AudioEngine {
         }
 
         let m = song.master
-        masterMixer.outputVolume = AudioEngine.gain(m.volumeDB)
+        masterFader.outputVolume = AudioEngine.gain(m.volumeDB)
         limiter.bypass = !m.limiterOn
         setParam(limiter, 2, 0) // pre-gain
         if lastReverbRoom != m.reverbRoom {

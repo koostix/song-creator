@@ -204,9 +204,11 @@ struct MasterStrip: View {
         VStack(spacing: 8) {
             Text("MASTER").font(.system(size: 10, weight: .bold)).frame(maxWidth: .infinity)
                 .padding(.vertical, 3).background(Theme.accent.opacity(0.35))
+            // The mix flows top to bottom: the master's plugins, then the fader, then the limiter.
+            InsertSlots(masterOf: session)
+                .padding(.top, -4)
             LitButton(label: "LIMIT", on: session.song.master.limiterOn, color: .green, width: 52,
-                      help: "Peak limiter on the mix bus") { session.song.master.limiterOn.toggle() }
-            Spacer()
+                      help: "Peak limiter on the mix bus, after the master's plugins and fader") { session.song.master.limiterOn.toggle() }
             HStack(spacing: 3) {
                 Fader(db: $session.song.master.volumeDB, height: 150)
                 MeterBar(level: { [audio = session.audio] in audio.meters.level(MeterStore.masterID) })
@@ -215,7 +217,7 @@ struct MasterStrip: View {
             Text(session.song.master.volumeDB.dbString).font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.dim)
         }
         .padding(.bottom, 6)
-        .frame(width: 90)
+        .frame(width: 110)
         .frame(maxHeight: .infinity)
         .background(Theme.panel)
         .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -266,7 +268,28 @@ struct PluginRow: View {
 /// Takes the strip's spare height, so a taller mixer shows more of a long effect chain.
 struct InsertSlots: View {
     @Bindable var session: Session
-    let track: Track
+    /// The track, or Song.masterID.
+    let ownerID: UUID
+    let inserts: [PluginSlot]
+    /// A track's strip (MIDI tracks show their instrument first); nil on the master.
+    let track: Track?
+
+    init(session: Session, track: Track) {
+        self.session = session
+        ownerID = track.id
+        inserts = track.inserts
+        self.track = track
+    }
+
+    /// The master's plugins, before its fader and limiter.
+    init(masterOf session: Session) {
+        self.session = session
+        ownerID = Song.masterID
+        inserts = session.song.master.inserts
+        track = nil
+    }
+
+    private var hasInstrument: Bool { track?.kind == .midi }
 
     static let rowHeight: CGFloat = 18
     /// Three rows and the "+ Insert" line: the size at the default mixer height.
@@ -283,10 +306,10 @@ struct InsertSlots: View {
 
     var body: some View {
         GeometryReader { geo in
-            let fit = InsertSlots.layout(height: geo.size.height, instrument: track.kind == .midi, inserts: track.inserts.count)
+            let fit = InsertSlots.layout(height: geo.size.height, instrument: hasInstrument, inserts: inserts.count)
             VStack(spacing: 2) {
-                if track.kind == .midi { instrumentRow }
-                ForEach(track.inserts.prefix(fit.effects)) { slot in effectRow(slot) }
+                if let track, hasInstrument { instrumentRow(track) }
+                ForEach(inserts.prefix(fit.effects)) { slot in effectRow(slot) }
                 if fit.more > 0 { moreRow(fit.more) }
                 addMenu
             }
@@ -296,7 +319,7 @@ struct InsertSlots: View {
         .frame(minHeight: InsertSlots.minHeight, maxHeight: .infinity)
     }
 
-    @ViewBuilder private var instrumentRow: some View {
+    @ViewBuilder private func instrumentRow(_ track: Track) -> some View {
         if let ext = track.external {
             PluginRow(name: "⇄ \(ext.deviceName) ch\(ext.channel)",
                       status: session.isConnected(ext) ? nil : "\(ext.deviceName) isn't connected",
@@ -323,16 +346,16 @@ struct InsertSlots: View {
 
     private func effectRow(_ slot: PluginSlot) -> some View {
         PluginRow(name: slot.name, status: session.pluginStatus(slot), bypassed: slot.bypass,
-                  onBypass: { session.toggleBypass(slot.id, in: track.id) },
-                  onOpen: { session.openEditor(slot, track: track) },
-                  onRemove: { session.removeInsert(slot.id, from: track.id) })
+                  onBypass: { session.toggleBypass(slot.id, in: ownerID) },
+                  onOpen: { session.openEditor(slot, owner: ownerID) },
+                  onRemove: { session.removeInsert(slot.id, from: ownerID) })
             .contextMenu {
-                Button("Open Editor") { session.openEditor(slot, track: track) }
-                Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: track.id) }
-                Button("Move Up") { session.moveInsert(slot.id, in: track.id, by: -1) }
-                Button("Move Down") { session.moveInsert(slot.id, in: track.id, by: 1) }
+                Button("Open Editor") { session.openEditor(slot, owner: ownerID) }
+                Button(slot.bypass ? "Enable" : "Bypass") { session.toggleBypass(slot.id, in: ownerID) }
+                Button("Move Up") { session.moveInsert(slot.id, in: ownerID, by: -1) }
+                Button("Move Down") { session.moveInsert(slot.id, in: ownerID, by: 1) }
                 Divider()
-                Button("Remove") { session.removeInsert(slot.id, from: track.id) }
+                Button("Remove") { session.removeInsert(slot.id, from: ownerID) }
             }
     }
 
@@ -341,7 +364,7 @@ struct InsertSlots: View {
         let label = Text("+\(count) more").font(.system(size: 9, weight: .semibold))
         if session.mixerFull {
             label.foregroundStyle(Theme.dim).frame(height: 16)
-                .help("The track's FX button lists every plugin")
+                .help(track == nil ? "Make the mixer taller to see every plugin" : "The track's FX button lists every plugin")
         } else {
             Button {
                 withAnimation(.easeOut(duration: 0.15)) { session.mixerFull = true }
@@ -365,7 +388,7 @@ struct InsertSlots: View {
             ForEach(PluginCatalog.grouped(PluginCatalog.effects), id: \.0) { group in
                 Menu(group.0) {
                     ForEach(group.1) { info in
-                        Button(info.name) { session.addInsert(info, to: track.id) }
+                        Button(info.name) { session.addInsert(info, to: ownerID) }
                     }
                 }
             }
